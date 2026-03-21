@@ -22,6 +22,87 @@ describe('MetadataStore', () => {
     store.close()
   })
 
+  // ── Bucket operations ────────────────────────────────────────────────
+
+  describe('createBucket / bucketExists / listBuckets', () => {
+    it('default bucket exists on init', () => {
+      expect(store.bucketExists('default')).toBe(true)
+    })
+
+    it('creates and finds a new bucket', () => {
+      const created = store.createBucket('photos')
+
+      expect(created).toBe(true)
+      expect(store.bucketExists('photos')).toBe(true)
+    })
+
+    it('returns false for duplicate bucket creation', () => {
+      store.createBucket('photos')
+      const duplicate = store.createBucket('photos')
+
+      expect(duplicate).toBe(false)
+    })
+
+    it('lists all buckets including default', () => {
+      store.createBucket('videos')
+      store.createBucket('audio')
+
+      const buckets = store.listBuckets()
+
+      expect(buckets.length).toBeGreaterThanOrEqual(3)
+      const names = buckets.map((b) => b.name)
+      expect(names).toContain('default')
+      expect(names).toContain('videos')
+      expect(names).toContain('audio')
+    })
+
+    it('returns false for non-existent bucket', () => {
+      expect(store.bucketExists('nonexistent')).toBe(false)
+    })
+  })
+
+  describe('deleteBucket', () => {
+    it('deletes an empty bucket', () => {
+      store.createBucket('temp')
+      const deleted = store.deleteBucket('temp')
+
+      expect(deleted).toBe(true)
+      expect(store.bucketExists('temp')).toBe(false)
+    })
+
+    it('refuses to delete default bucket', () => {
+      const deleted = store.deleteBucket('default')
+
+      expect(deleted).toBe(false)
+      expect(store.bucketExists('default')).toBe(true)
+    })
+
+    it('refuses to delete bucket with objects', () => {
+      store.createBucket('data')
+      store.putObject('data', 'file.txt', 'cid', 100, 'text/plain', 'etag')
+
+      const deleted = store.deleteBucket('data')
+
+      expect(deleted).toBe(false)
+      expect(store.bucketExists('data')).toBe(true)
+    })
+
+    it('can delete bucket after all objects are soft-deleted', () => {
+      store.createBucket('data')
+      store.putObject('data', 'file.txt', 'cid', 100, 'text/plain', 'etag')
+      store.deleteObject('data', 'file.txt')
+
+      const deleted = store.deleteBucket('data')
+
+      expect(deleted).toBe(true)
+    })
+
+    it('returns false for non-existent bucket', () => {
+      const deleted = store.deleteBucket('nonexistent')
+      expect(deleted).toBe(false)
+    })
+  })
+
   // ── Basic CRUD ──────────────────────────────────────────────────────
 
   describe('putObject / getObject', () => {

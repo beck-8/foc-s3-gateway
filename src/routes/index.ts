@@ -7,22 +7,15 @@
 import { createHash } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import type { Logger } from 'pino'
-import { sendInternalError, sendNoSuchBucket, sendNoSuchKey } from '../s3/errors.js'
+import { sendInternalError, sendNoSuchBucket, sendNoSuchKey, sendS3Error } from '../s3/errors.js'
 import { buildListBucketsXml, buildListObjectsV2Xml } from '../s3/xml.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
-
-const DEFAULT_BUCKET = 'default'
 
 export interface RouteContext {
   metadataStore: MetadataStore
   synapseClient: SynapseClient
   logger: Logger
-}
-
-/** Check if the bucket is valid (we only support the default bucket for now) */
-function isValidBucket(bucket: string): boolean {
-  return bucket === DEFAULT_BUCKET
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -33,18 +26,25 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     logger.debug('ListBuckets')
 
     const ownerId = synapseClient.getAddress()
-
-    const xml = buildListBucketsXml(
-      [
-        {
-          name: DEFAULT_BUCKET,
-          creationDate: new Date().toISOString(),
-        },
-      ],
-      ownerId
-    )
+    const buckets = metadataStore.listBuckets()
+    const xml = buildListBucketsXml(buckets, ownerId)
 
     reply.header('Content-Type', 'application/xml').send(xml)
+  })
+
+  // ── CreateBucket: PUT /{bucket} (no wildcard key) ──────────────────
+  app.put('/:bucket', async (request, reply) => {
+    const { bucket } = request.params as { bucket: string }
+    logger.debug({ bucket }, 'CreateBucket')
+
+    if (metadataStore.bucketExists(bucket)) {
+      // S3 returns 409 BucketAlreadyOwnedByYou — but many clients tolerate 200
+      sendS3Error(reply, 409, 'BucketAlreadyOwnedByYou', 'Your previous request to create the named bucket succeeded and you already own it.', bucket)
+      return
+    }
+
+    metadataStore.createBucket(bucket)
+    reply.status(200).header('Location', `/${bucket}`).send()
   })
 
   // ── HeadBucket: HEAD /{bucket} ──────────────────────────────────────
@@ -52,12 +52,31 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const { bucket } = request.params as { bucket: string }
     logger.debug({ bucket }, 'HeadBucket')
 
-    if (!isValidBucket(bucket)) {
+    if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }
 
     reply.status(200).header('x-amz-bucket-region', 'us-east-1').send()
+  })
+
+  // ── DeleteBucket: DELETE /{bucket} (no wildcard key) ────────────────
+  app.delete('/:bucket', async (request, reply) => {
+    const { bucket } = request.params as { bucket: string }
+    logger.debug({ bucket }, 'DeleteBucket')
+
+    if (!metadataStore.bucketExists(bucket)) {
+      sendNoSuchBucket(reply, bucket)
+      return
+    }
+
+    const deleted = metadataStore.deleteBucket(bucket)
+    if (!deleted) {
+      sendS3Error(reply, 409, 'BucketNotEmpty', 'The bucket you tried to delete is not empty.', bucket)
+      return
+    }
+
+    reply.status(204).send()
   })
 
   // ── ListObjectsV2: GET /{bucket}?list-type=2 ──────────────────────
@@ -66,7 +85,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const query = request.query as Record<string, string>
     logger.debug({ bucket, query }, 'ListObjectsV2')
 
-    if (!isValidBucket(bucket)) {
+    if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }
@@ -111,7 +130,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'HeadObject')
 
-    if (!isValidBucket(bucket)) {
+    if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }
@@ -137,7 +156,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'GetObject')
 
-    if (!isValidBucket(bucket)) {
+    if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }
@@ -170,7 +189,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'PutObject')
 
-    if (!isValidBucket(bucket)) {
+    if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }
@@ -224,7 +243,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'DeleteObject')
 
-    if (!isValidBucket(bucket)) {
+    if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }

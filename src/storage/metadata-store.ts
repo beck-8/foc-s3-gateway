@@ -7,7 +7,7 @@
 
 import Database from 'better-sqlite3'
 import type { Logger } from 'pino'
-import type { S3Object } from '../s3/types.js'
+import type { S3Bucket, S3Object } from '../s3/types.js'
 
 export interface MetadataStoreOptions {
   dbPath: string
@@ -27,6 +27,11 @@ export class MetadataStore {
 
   private initSchema(): void {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS buckets (
+        name TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
       CREATE TABLE IF NOT EXISTS objects (
         bucket TEXT NOT NULL,
         key TEXT NOT NULL,
@@ -44,8 +49,50 @@ export class MetadataStore {
       CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_objects_piece_cid ON objects(piece_cid);
     `)
+
+    // Ensure default bucket always exists
+    this.createBucket('default')
+
     this.logger.debug('database schema initialized')
   }
+
+  // ── Bucket operations ─────────────────────────────────────────────
+
+  createBucket(name: string): boolean {
+    const stmt = this.db.prepare('INSERT OR IGNORE INTO buckets (name) VALUES (?)')
+    const result = stmt.run(name)
+    if (result.changes > 0) {
+      this.logger.debug({ bucket: name }, 'bucket created')
+    }
+    return result.changes > 0
+  }
+
+  deleteBucket(name: string): boolean {
+    // Don't allow deleting default bucket
+    if (name === 'default') return false
+
+    // Check if bucket has objects
+    const hasObjects = this.db.prepare(
+      'SELECT 1 FROM objects WHERE bucket = ? AND deleted = 0 LIMIT 1'
+    ).get(name)
+    if (hasObjects) return false
+
+    const stmt = this.db.prepare('DELETE FROM buckets WHERE name = ?')
+    const result = stmt.run(name)
+    return result.changes > 0
+  }
+
+  listBuckets(): S3Bucket[] {
+    const rows = this.db.prepare('SELECT name, created_at as creationDate FROM buckets ORDER BY name').all()
+    return rows as S3Bucket[]
+  }
+
+  bucketExists(name: string): boolean {
+    const row = this.db.prepare('SELECT 1 FROM buckets WHERE name = ?').get(name)
+    return row !== undefined
+  }
+
+  // ── Object operations ──────────────────────────────────────────────
 
   putObject(bucket: string, key: string, pieceCid: string, size: number, contentType: string, etag: string): void {
     const stmt = this.db.prepare(`

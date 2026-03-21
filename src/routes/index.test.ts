@@ -80,6 +80,89 @@ describe('S3 Routes', () => {
     })
   })
 
+  // ── CreateBucket: PUT /{bucket} ─────────────────────────────────────
+
+  describe('PUT /:bucket (CreateBucket)', () => {
+    it('creates a new bucket', async () => {
+      const response = await app.inject({ method: 'PUT', url: '/photos' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['location']).toBe('/photos')
+
+      // Verify bucket is accessible
+      const head = await app.inject({ method: 'HEAD', url: '/photos' })
+      expect(head.statusCode).toBe(200)
+    })
+
+    it('returns 409 for duplicate bucket', async () => {
+      const response = await app.inject({ method: 'PUT', url: '/default' })
+
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toContain('BucketAlreadyOwnedByYou')
+    })
+
+    it('new bucket appears in ListBuckets', async () => {
+      await app.inject({ method: 'PUT', url: '/my-data' })
+
+      const response = await app.inject({ method: 'GET', url: '/' })
+
+      expect(response.body).toContain('<Name>my-data</Name>')
+      expect(response.body).toContain('<Name>default</Name>')
+    })
+
+    it('can upload to newly created bucket', async () => {
+      await app.inject({ method: 'PUT', url: '/photos' })
+
+      const put = await app.inject({
+        method: 'PUT',
+        url: '/photos/sunset.jpg',
+        payload: 'image-data',
+      })
+
+      expect(put.statusCode).toBe(200)
+
+      const obj = metadataStore.getObject('photos', 'sunset.jpg')
+      expect(obj).toBeDefined()
+    })
+  })
+
+  // ── DeleteBucket: DELETE /{bucket} ──────────────────────────────────
+
+  describe('DELETE /:bucket (DeleteBucket)', () => {
+    it('deletes an empty bucket', async () => {
+      await app.inject({ method: 'PUT', url: '/temp' })
+      const response = await app.inject({ method: 'DELETE', url: '/temp' })
+
+      expect(response.statusCode).toBe(204)
+
+      // Verify bucket is gone
+      const head = await app.inject({ method: 'HEAD', url: '/temp' })
+      expect(head.statusCode).toBe(404)
+    })
+
+    it('returns 409 for non-empty bucket', async () => {
+      await app.inject({ method: 'PUT', url: '/data' })
+      metadataStore.putObject('data', 'file.txt', 'cid', 10, 'text/plain', 'etag')
+
+      const response = await app.inject({ method: 'DELETE', url: '/data' })
+
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toContain('BucketNotEmpty')
+    })
+
+    it('returns 404 for non-existent bucket', async () => {
+      const response = await app.inject({ method: 'DELETE', url: '/nonexistent' })
+
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('returns 409 when deleting default bucket', async () => {
+      const response = await app.inject({ method: 'DELETE', url: '/default' })
+
+      expect(response.statusCode).toBe(409)
+    })
+  })
+
   // ── ListObjectsV2: GET /{bucket} ───────────────────────────────────
 
   describe('GET /:bucket (ListObjectsV2)', () => {
