@@ -148,7 +148,10 @@ Without credentials, the server runs in open mode (no auth).
 | Item | AWS S3 | FOC S3 Gateway |
 |------|--------|----------------|
 | Storage backend | AWS infrastructure | Filecoin SPs (on-chain proofs) |
-| Upload latency | Milliseconds | Seconds (on-chain transaction) |
+| **Min file size** | No minimum | **127 bytes** (PieceCID requirement) |
+| **Max file size** | 5 TiB (multipart) | **~1 GiB** (1,065,353,216 bytes) |
+| Upload latency | Milliseconds | Seconds~minutes (on-chain transaction) |
+| Storage copies | Region-based | Default 2 (1 primary + 1 secondary SP); may get fewer if fewer SPs available |
 | Delete | Immediate | Soft delete (metadata only; SP data retained) |
 | CopyObject | Server-side copy | Metadata-only copy (same PieceCID) |
 | Consistency | Strong | Local SQLite = strong; SP = eventual |

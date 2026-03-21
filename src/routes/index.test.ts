@@ -116,7 +116,7 @@ describe('S3 Routes', () => {
       const put = await app.inject({
         method: 'PUT',
         url: '/photos/sunset.jpg',
-        payload: 'image-data',
+        payload: 'x'.repeat(128),
       })
 
       expect(put.statusCode).toBe(200)
@@ -211,10 +211,11 @@ describe('S3 Routes', () => {
 
   describe('PUT /:bucket/* (PutObject)', () => {
     it('uploads and stores metadata', async () => {
+      const payload = 'x'.repeat(128) // Must be >= 127 bytes (Filecoin SP minimum)
       const response = await app.inject({
         method: 'PUT',
         url: '/default/hello.txt',
-        payload: 'Hello, Filecoin!',
+        payload,
         headers: { 'content-type': 'text/plain' },
       })
 
@@ -246,11 +247,23 @@ describe('S3 Routes', () => {
       const response = await app.inject({
         method: 'PUT',
         url: '/default/fail.txt',
-        payload: 'data',
+        payload: 'x'.repeat(128),
       })
 
       expect(response.statusCode).toBe(500)
       expect(response.body).toContain('InternalError')
+    })
+
+    it('rejects files smaller than 127 bytes', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/tiny.txt',
+        payload: 'too small',
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toContain('EntityTooSmall')
     })
   })
 

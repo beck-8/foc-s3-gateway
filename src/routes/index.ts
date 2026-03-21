@@ -251,6 +251,20 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return
       }
 
+      // Validate file size limits (Filecoin SP constraints)
+      const MIN_UPLOAD_SIZE = 127
+      const MAX_UPLOAD_SIZE = 1_065_353_216 // ~1 GiB with fr32 expansion
+      if (body.length < MIN_UPLOAD_SIZE) {
+        sendS3Error(reply, 400, 'EntityTooSmall',
+          `Object size ${body.length} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`, key)
+        return
+      }
+      if (body.length > MAX_UPLOAD_SIZE) {
+        sendS3Error(reply, 400, 'EntityTooLarge',
+          `Object size ${body.length} bytes exceeds maximum ${MAX_UPLOAD_SIZE} bytes (~1 GiB).`, key)
+        return
+      }
+
       // Upload to FOC via Synapse SDK
       const data = new Uint8Array(body)
       const result = await synapseClient.upload(data)

@@ -108,25 +108,17 @@ export async function startServer(options: ServerOptions): Promise<void> {
 
     const webdavAddr = `${options.host}:${webdavPort}`
 
+    app.log.info({ endpoint: `http://${addressStr}` }, 'S3 server listening')
+    app.log.info({ endpoint: `http://${webdavAddr}` }, 'WebDAV server listening')
+
+    const authStatus = options.accessKey ? 'enabled' : 'disabled'
     app.log.info(`
-╔══════════════════════════════════════════════════════════════╗
-║  FOC S3 Gateway is running!                                  ║
-║                                                              ║
-║  S3 Endpoint:     http://${addressStr.padEnd(34)}║
-║  WebDAV Endpoint: http://${webdavAddr.padEnd(34)}║
-║                                                              ║
-║  Rclone S3 config:                                           ║
-║    [foc]                                                     ║
-║    type = s3                                                 ║
-║    provider = Other                                          ║
-║    endpoint = http://${addressStr.padEnd(40)}║
-║    access_key_id = <your-access-key>                         ║
-║    secret_access_key = <your-secret-key>                     ║
-║                                                              ║
-║  WebDAV usage (rclone/WinSCP recommended):                   ║
-║    rclone:  type=webdav, url=http://${webdavAddr.padEnd(22)}        ║
-║    macOS:   Finder → Connect → http://${webdavAddr.padEnd(18)}       ║
-╚══════════════════════════════════════════════════════════════╝
+  FOC S3 Gateway
+  ──────────────────────────────────
+  S3:     http://${addressStr}
+  WebDAV: http://${webdavAddr}
+  Auth:   ${authStatus}
+  ──────────────────────────────────
 `)
   } catch (error) {
     app.log.error(error)

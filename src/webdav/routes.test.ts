@@ -132,10 +132,12 @@ describe('WebDAV Routes', () => {
 
   describe('PUT (upload)', () => {
     it('uploads a file', async () => {
+      // Payload must be >= 127 bytes (Filecoin SP minimum)
+      const payload = 'x'.repeat(128)
       const response = await app.inject({
         method: 'PUT',
         url: '/default/new-file.txt',
-        payload: 'Hello WebDAV',
+        payload,
         headers: { 'content-type': 'text/plain' },
       })
 
@@ -145,6 +147,18 @@ describe('WebDAV Routes', () => {
       const obj = metadataStore.getObject('default', 'new-file.txt')
       expect(obj).toBeDefined()
       expect(obj?.pieceCid).toBe('baga-test')
+    })
+
+    it('rejects files smaller than 127 bytes', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/tiny.txt',
+        payload: 'too small',
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toContain('too small')
     })
   })
 

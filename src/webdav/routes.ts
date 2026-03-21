@@ -148,6 +148,18 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         return
       }
 
+      // Validate file size limits (Filecoin SP constraints)
+      const MIN_UPLOAD_SIZE = 127
+      const MAX_UPLOAD_SIZE = 1_065_353_216 // ~1 GiB with fr32 expansion
+      if (body.length < MIN_UPLOAD_SIZE) {
+        reply.status(400).send(`File too small: ${body.length} bytes (minimum ${MIN_UPLOAD_SIZE} bytes)`)
+        return
+      }
+      if (body.length > MAX_UPLOAD_SIZE) {
+        reply.status(413).send(`File too large: ${body.length} bytes (maximum ~1 GiB)`)
+        return
+      }
+
       const data = new Uint8Array(body)
       const result = await synapseClient.upload(data)
       metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag, result.copies)
