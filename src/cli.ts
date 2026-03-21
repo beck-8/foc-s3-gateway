@@ -25,6 +25,7 @@ program
   .option('-n, --network <network>', 'Network: mainnet or calibration', 'calibration')
   .option('-a, --access-key <key>', 'Access key for authentication (or set ACCESS_KEY env)')
   .option('-s, --secret-key <key>', 'Secret key for authentication (or set SECRET_KEY env)')
+  .option('-w, --webdav-port <port>', 'WebDAV server port (default: S3 port + 1)')
   .action(async (options) => {
     const privateKey = options.privateKey ?? process.env['PRIVATE_KEY']
     if (!privateKey) {
@@ -42,6 +43,7 @@ program
       dbPath: options.dbPath ?? process.env['DB_PATH'],
       accessKey: options.accessKey ?? process.env['ACCESS_KEY'],
       secretKey: options.secretKey ?? process.env['SECRET_KEY'],
+      webdavPort: options.webdavPort ? Number.parseInt(options.webdavPort, 10) : undefined,
     })
   })
 

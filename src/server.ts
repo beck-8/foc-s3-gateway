@@ -11,6 +11,7 @@ import { registerRoutes } from './routes/index.js'
 import { createAuthHook } from './auth/index.js'
 import { MetadataStore } from './storage/metadata-store.js'
 import { SynapseClient } from './storage/synapse-client.js'
+import { startWebDavServer } from './webdav/server.js'
 
 export interface ServerOptions {
   port: number
@@ -21,6 +22,7 @@ export interface ServerOptions {
   dbPath?: string | undefined
   accessKey?: string | undefined
   secretKey?: string | undefined
+  webdavPort?: number | undefined
 }
 
 export async function createServer(options: ServerOptions) {
@@ -72,7 +74,7 @@ export async function createServer(options: ServerOptions) {
     logger.warn('no access key / secret key configured — running WITHOUT authentication')
   }
 
-  // Register routes
+  // Register S3 routes
   registerRoutes(app, { metadataStore, synapseClient, logger })
 
   // Graceful shutdown
@@ -84,7 +86,7 @@ export async function createServer(options: ServerOptions) {
 }
 
 export async function startServer(options: ServerOptions): Promise<void> {
-  const { app } = await createServer(options)
+  const { app, metadataStore, synapseClient } = await createServer(options)
 
   try {
     await app.listen({ port: options.port, host: options.host })
@@ -92,24 +94,39 @@ export async function startServer(options: ServerOptions): Promise<void> {
     const address = app.server.address()
     const addressStr = typeof address === 'string' ? address : `${address?.address}:${address?.port}`
 
+    // Start WebDAV server on a separate port
+    const webdavPort = options.webdavPort ?? options.port + 1
+    await startWebDavServer({
+      port: webdavPort,
+      host: options.host,
+      metadataStore,
+      synapseClient,
+      logger: app.log as Logger,
+      accessKey: options.accessKey,
+      secretKey: options.secretKey,
+    })
+
+    const webdavAddr = `${options.host}:${webdavPort}`
+
     app.log.info(`
 ╔══════════════════════════════════════════════════════════════╗
 ║  FOC S3 Gateway is running!                                  ║
 ║                                                              ║
-║  Endpoint: http://${addressStr.padEnd(40)}║
+║  S3 Endpoint:     http://${addressStr.padEnd(34)}║
+║  WebDAV Endpoint: http://${webdavAddr.padEnd(34)}║
 ║                                                              ║
-║  Rclone config:                                              ║
+║  Rclone S3 config:                                           ║
 ║    [foc]                                                     ║
 ║    type = s3                                                 ║
 ║    provider = Other                                          ║
 ║    endpoint = http://${addressStr.padEnd(40)}║
-║    access_key_id = any                                       ║
-║    secret_access_key = any                                   ║
+║    access_key_id = <your-access-key>                         ║
+║    secret_access_key = <your-secret-key>                     ║
 ║                                                              ║
-║  Usage:                                                      ║
-║    rclone ls foc:default                                     ║
-║    rclone copy ./file.txt foc:default/                       ║
-║    rclone mount foc:default /mnt/foc --vfs-cache-mode full   ║
+║  WebDAV usage:                                               ║
+║    Windows: net use Z: http://${webdavAddr.padEnd(25)}       ║
+║    macOS:   Finder → Connect → http://${webdavAddr.padEnd(18)}       ║
+║    rclone:  rclone config (type=webdav, url=http://${webdavAddr})    ║
 ╚══════════════════════════════════════════════════════════════╝
 `)
   } catch (error) {
