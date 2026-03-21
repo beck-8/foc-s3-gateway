@@ -72,10 +72,5 @@ export async function createWebDavServer(options: WebDavServerOptions) {
 export async function startWebDavServer(options: WebDavServerOptions): Promise<void> {
   const app = await createWebDavServer(options)
 
-  await app.listen({ port: options.port, host: options.host })
-
-  const address = app.server.address()
-  const addressStr = typeof address === 'string' ? address : `${address?.address}:${address?.port}`
-
-  options.logger.info(`WebDAV server listening at http://${addressStr}`)
+  await app.listen({ port: options.port, host: options.host, listenTextResolver: () => '' })
 }

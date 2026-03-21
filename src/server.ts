@@ -89,7 +89,7 @@ export async function startServer(options: ServerOptions): Promise<void> {
   const { app, metadataStore, synapseClient } = await createServer(options)
 
   try {
-    await app.listen({ port: options.port, host: options.host })
+    await app.listen({ port: options.port, host: options.host, listenTextResolver: () => '' })
 
     const address = app.server.address()
     const addressStr = typeof address === 'string' ? address : `${address?.address}:${address?.port}`
@@ -108,17 +108,14 @@ export async function startServer(options: ServerOptions): Promise<void> {
 
     const webdavAddr = `${options.host}:${webdavPort}`
 
-    app.log.info({ endpoint: `http://${addressStr}` }, 'S3 server listening')
-    app.log.info({ endpoint: `http://${webdavAddr}` }, 'WebDAV server listening')
-
     const authStatus = options.accessKey ? 'enabled' : 'disabled'
     app.log.info(`
   FOC S3 Gateway
-  ──────────────────────────────────
+  ----------------------------------
   S3:     http://${addressStr}
   WebDAV: http://${webdavAddr}
   Auth:   ${authStatus}
-  ──────────────────────────────────
+  ----------------------------------
 `)
   } catch (error) {
     app.log.error(error)
