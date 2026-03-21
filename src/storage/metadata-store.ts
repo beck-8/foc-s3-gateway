@@ -369,7 +369,8 @@ export class MetadataStore {
       .prepare(`
       SELECT id, piece_cid, piece_id, provider_id, data_set_id, retrieval_url, attempts
       FROM pending_deletions
-      WHERE attempts < 5
+      WHERE attempts < 5 
+        AND (last_attempt IS NULL OR last_attempt < datetime('now', '-5 minutes'))
       ORDER BY created_at ASC
       LIMIT ?
     `)
