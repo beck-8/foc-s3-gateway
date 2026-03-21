@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/cli.ts serve",
+    "dev": "tsx src/cli.ts serve",
     "start": "node dist/cli.js serve",
     "test": "npm run lint && npm run typecheck && vitest run",
     "test:unit": "vitest run",
