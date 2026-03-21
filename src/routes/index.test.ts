@@ -28,7 +28,13 @@ function createMockSynapseClient() {
       }
       return { pieceCid: 'baga-test-cid', size: 1024, copies: [] }
     }),
-    download: vi.fn().mockResolvedValue(new Uint8Array([72, 101, 108, 108, 111])), // "Hello"
+    download: vi.fn().mockImplementation(async () => {
+      const { Readable } = await import('node:stream')
+      return {
+        stream: Readable.from(Buffer.from('Hello')),
+        contentLength: 5,
+      }
+    }), // "Hello"
   }
 }
 

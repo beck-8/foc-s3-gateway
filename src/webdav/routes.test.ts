@@ -25,7 +25,13 @@ describe('WebDAV Routes', () => {
       }
       return { pieceCid: 'baga-test', size: 100, copies: [] }
     }),
-    download: vi.fn().mockResolvedValue(new Uint8Array([72, 101, 108, 108, 111])),
+    download: vi.fn().mockImplementation(async () => {
+      const { Readable } = await import('node:stream')
+      return {
+        stream: Readable.from(Buffer.from('Hello')),
+        contentLength: 5,
+      }
+    }),
     getAddress: vi.fn().mockReturnValue('0xtest'),
   }
 

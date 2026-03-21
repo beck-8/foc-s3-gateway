@@ -105,13 +105,19 @@ export class SynapseClient {
   }
 
   /**
-   * Download with fallback strategy:
+   * Download with fallback strategy (streaming):
    *   1. Try each stored retrieval URL directly (primary first, then secondaries)
    *   2. Fall back to Synapse SDK discovery (tries all known providers)
    *
-   * Direct URL fetch is faster because it skips provider discovery and chain lookups.
+   * Returns a Node.js Readable stream so data is piped directly to the client
+   * without buffering entire files in memory.
    */
-  async download(pieceCid: string, copies?: CopyInfo[]): Promise<Uint8Array> {
+  async download(
+    pieceCid: string,
+    copies?: CopyInfo[]
+  ): Promise<{ stream: import('node:stream').Readable; contentLength?: number }> {
+    const { Readable } = await import('node:stream')
+
     // Sort: primary first, then secondary
     const sorted = copies
       ? [...copies].sort((a, b) => (a.role === 'primary' ? -1 : 1) - (b.role === 'primary' ? -1 : 1))
@@ -123,13 +129,17 @@ export class SynapseClient {
         this.logger.debug({ pieceCid, providerId: copy.providerId, role: copy.role }, 'trying direct download')
 
         const response = await fetch(copy.retrievalUrl)
-        if (response.ok) {
-          const data = new Uint8Array(await response.arrayBuffer())
+        if (response.ok && response.body) {
+          const clHeader = response.headers.get('content-length')
+          const contentLength = clHeader ? Number(clHeader) : undefined
           this.logger.info(
-            { pieceCid, providerId: copy.providerId, role: copy.role, size: data.length },
-            'direct download succeeded'
+            { pieceCid, providerId: copy.providerId, role: copy.role, contentLength },
+            'direct download streaming started'
           )
-          return data
+          const nodeStream = Readable.fromWeb(response.body as import('node:stream/web').ReadableStream)
+          const result: { stream: import('node:stream').Readable; contentLength?: number } = { stream: nodeStream }
+          if (contentLength !== undefined) result.contentLength = contentLength
+          return result
         }
 
         this.logger.warn(
@@ -141,13 +151,13 @@ export class SynapseClient {
       }
     }
 
-    // Fallback: Synapse SDK discovery (slower but more resilient)
+    // Fallback: Synapse SDK discovery (slower, returns full Uint8Array)
     this.logger.info({ pieceCid }, 'falling back to SDK download')
     const synapse = this.getSynapse()
     const data = await synapse.storage.download({ pieceCid })
 
-    this.logger.info({ pieceCid, size: data.length }, 'SDK download complete')
-    return data
+    this.logger.info({ pieceCid, size: data.length }, 'SDK download complete, wrapping as stream')
+    return { stream: Readable.from(data), contentLength: data.length }
   }
 
   // ── Delete ────────────────────────────────────────────────────────

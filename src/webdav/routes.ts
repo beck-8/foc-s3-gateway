@@ -96,15 +96,15 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
 
     try {
       const copies = metadataStore.getObjectCopies(bucket, key)
-      const data = await synapseClient.download(obj.pieceCid, copies)
+      const { stream } = await synapseClient.download(obj.pieceCid, copies)
 
-      reply
-        .status(200)
-        .header('Content-Type', obj.contentType)
-        .header('Content-Length', data.length)
-        .header('ETag', `"${obj.etag}"`)
-        .header('Last-Modified', new Date(obj.lastModified).toUTCString())
-        .send(Buffer.from(data))
+      reply.raw.writeHead(200, {
+        'Content-Type': obj.contentType,
+        'Content-Length': obj.size,
+        ETag: `"${obj.etag}"`,
+        'Last-Modified': new Date(obj.lastModified).toUTCString(),
+      })
+      stream.pipe(reply.raw)
     } catch (error) {
       logger.error({ error, bucket, key }, 'WebDAV download failed')
       reply.status(500).send('Internal Server Error')

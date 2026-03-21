@@ -174,15 +174,15 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     try {
       // Get stored copy URLs for direct download (primary → secondary → SDK fallback)
       const copies = metadataStore.getObjectCopies(bucket, key)
-      const data = await synapseClient.download(obj.pieceCid, copies)
+      const { stream } = await synapseClient.download(obj.pieceCid, copies)
 
-      reply
-        .status(200)
-        .header('Content-Type', obj.contentType)
-        .header('Content-Length', data.length)
-        .header('ETag', `"${obj.etag}"`)
-        .header('Last-Modified', new Date(obj.lastModified).toUTCString())
-        .send(Buffer.from(data))
+      reply.raw.writeHead(200, {
+        'Content-Type': obj.contentType,
+        'Content-Length': obj.size,
+        ETag: `"${obj.etag}"`,
+        'Last-Modified': new Date(obj.lastModified).toUTCString(),
+      })
+      stream.pipe(reply.raw)
     } catch (error) {
       logger.error({ error, bucket, key, pieceCid: obj.pieceCid }, 'download failed')
       sendInternalError(reply, 'Failed to download object from FOC storage')
