@@ -11,12 +11,20 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;')
 }
 
+/** Convert SQLite datetime ("YYYY-MM-DD HH:mm:ss") or ISO string to S3-compatible ISO 8601 */
+function toISO8601(dateStr: string): string {
+  // Already ISO 8601 (contains "T")
+  if (dateStr.includes('T')) return dateStr
+  // SQLite format: "2026-03-21 13:57:52" → "2026-03-21T13:57:52.000Z"
+  return new Date(`${dateStr}Z`).toISOString()
+}
+
 export function buildListBucketsXml(buckets: S3Bucket[], ownerId: string): string {
   const bucketEntries = buckets
     .map(
       (b) => `    <Bucket>
       <Name>${escapeXml(b.name)}</Name>
-      <CreationDate>${escapeXml(b.creationDate)}</CreationDate>
+      <CreationDate>${escapeXml(toISO8601(b.creationDate))}</CreationDate>
     </Bucket>`
     )
     .join('\n')
@@ -38,7 +46,7 @@ export function buildListObjectsV2Xml(response: ListObjectsV2Response): string {
     .map(
       (obj) => `  <Contents>
     <Key>${escapeXml(obj.key)}</Key>
-    <LastModified>${escapeXml(obj.lastModified)}</LastModified>
+    <LastModified>${escapeXml(toISO8601(obj.lastModified))}</LastModified>
     <ETag>"${escapeXml(obj.etag)}"</ETag>
     <Size>${obj.size}</Size>
     <StorageClass>STANDARD</StorageClass>
@@ -87,7 +95,7 @@ export function buildCopyObjectResultXml(etag: string, lastModified: string): st
   return `<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult>
   <ETag>"${escapeXml(etag)}"</ETag>
-  <LastModified>${escapeXml(lastModified)}</LastModified>
+  <LastModified>${escapeXml(toISO8601(lastModified))}</LastModified>
 </CopyObjectResult>`
 }
 
