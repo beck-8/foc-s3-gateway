@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import type { Logger } from 'pino'
 import { sendInternalError, sendNoSuchBucket, sendNoSuchKey, sendS3Error } from '../s3/errors.js'
-import { buildListBucketsXml, buildListObjectsV2Xml } from '../s3/xml.js'
+import { buildCopyObjectResultXml, buildListBucketsXml, buildListObjectsV2Xml } from '../s3/xml.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
 
@@ -185,16 +185,49 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
   })
 
-  // ── PutObject: PUT /{bucket}/{key+} ─────────────────────────────────
+  // ── PutObject / CopyObject: PUT /{bucket}/{key+} ──────────────────
   app.put('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
-    logger.debug({ bucket, key }, 'PutObject')
 
     if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }
+
+    // ── CopyObject: detected by x-amz-copy-source header ───────────
+    const copySource = request.headers['x-amz-copy-source'] as string | undefined
+    if (copySource) {
+      logger.debug({ bucket, key, copySource }, 'CopyObject')
+
+      // Parse source: "/{bucket}/{key}" or "{bucket}/{key}"
+      const normalized = copySource.startsWith('/') ? copySource.slice(1) : copySource
+      const slashIdx = normalized.indexOf('/')
+      if (slashIdx < 0) {
+        sendS3Error(reply, 400, 'InvalidArgument', 'Invalid x-amz-copy-source format', copySource)
+        return
+      }
+      const srcBucket = decodeURIComponent(normalized.slice(0, slashIdx))
+      const srcKey = decodeURIComponent(normalized.slice(slashIdx + 1))
+
+      if (!metadataStore.bucketExists(srcBucket)) {
+        sendNoSuchBucket(reply, srcBucket)
+        return
+      }
+
+      const copied = metadataStore.copyObject(srcBucket, srcKey, bucket, key)
+      if (!copied) {
+        sendNoSuchKey(reply, srcKey)
+        return
+      }
+
+      const xml = buildCopyObjectResultXml(copied.etag, copied.lastModified)
+      reply.header('Content-Type', 'application/xml').send(xml)
+      return
+    }
+
+    // ── PutObject: regular upload ────────────────────────────────
+    logger.debug({ bucket, key }, 'PutObject')
 
     try {
       // Collect request body as buffer

@@ -283,6 +283,51 @@ export class MetadataStore {
     return result.changes > 0
   }
 
+  /**
+   * Copy an object from one location to another (same or cross-bucket).
+   * Both source and destination point to the same PieceCID — no data is re-uploaded.
+   * Returns the copied object, or undefined if source doesn't exist.
+   */
+  copyObject(srcBucket: string, srcKey: string, dstBucket: string, dstKey: string): S3Object | undefined {
+    const src = this.getObject(srcBucket, srcKey)
+    if (!src) return undefined
+
+    const srcCopies = this.getObjectCopies(srcBucket, srcKey)
+
+    const transaction = this.db.transaction(() => {
+      // Insert/replace destination object with same pieceCid
+      this.db.prepare(`
+        INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, updated_at, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
+        ON CONFLICT (bucket, key) DO UPDATE SET
+          piece_cid = excluded.piece_cid,
+          size = excluded.size,
+          content_type = excluded.content_type,
+          etag = excluded.etag,
+          copies_count = excluded.copies_count,
+          updated_at = datetime('now'),
+          deleted = 0
+      `).run(dstBucket, dstKey, src.pieceCid, src.size, src.contentType, src.etag, srcCopies.length)
+
+      // Copy provider records
+      if (srcCopies.length > 0) {
+        this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(dstBucket, dstKey)
+        const insertCopy = this.db.prepare(`
+          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, retrieval_url, role)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `)
+        for (const copy of srcCopies) {
+          insertCopy.run(dstBucket, dstKey, copy.providerId, copy.dataSetId, copy.retrievalUrl, copy.role)
+        }
+      }
+    })
+
+    transaction()
+    this.logger.debug({ srcBucket, srcKey, dstBucket, dstKey, pieceCid: src.pieceCid }, 'object copied')
+
+    return this.getObject(dstBucket, dstKey)!
+  }
+
   objectExists(bucket: string, key: string): boolean {
     const stmt = this.db.prepare(
       'SELECT 1 FROM objects WHERE bucket = ? AND key = ? AND deleted = 0'

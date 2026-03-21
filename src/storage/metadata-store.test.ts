@@ -165,6 +165,63 @@ describe('MetadataStore', () => {
     })
   })
 
+  // ── copyObject ──────────────────────────────────────────────────────
+
+  describe('copyObject', () => {
+    const copies = [
+      { providerId: '42', dataSetId: '100', retrievalUrl: 'https://sp1.example.com/baga1', role: 'primary' as const },
+    ]
+
+    it('copies within same bucket', () => {
+      store.putObject('default', 'src.txt', 'cid1', 100, 'text/plain', 'etag1', copies)
+
+      const result = store.copyObject('default', 'src.txt', 'default', 'dst.txt')
+
+      expect(result).toBeDefined()
+      expect(result?.key).toBe('dst.txt')
+      expect(result?.pieceCid).toBe('cid1')
+      expect(result?.size).toBe(100)
+
+      // Source still exists
+      expect(store.getObject('default', 'src.txt')).toBeDefined()
+    })
+
+    it('copies across buckets', () => {
+      store.createBucket('archive')
+      store.putObject('default', 'file.txt', 'cid2', 200, 'text/plain', 'etag2')
+
+      const result = store.copyObject('default', 'file.txt', 'archive', 'file.txt')
+
+      expect(result).toBeDefined()
+      expect(store.getObject('archive', 'file.txt')?.pieceCid).toBe('cid2')
+    })
+
+    it('preserves copy info (provider records)', () => {
+      store.putObject('default', 'with-copies.txt', 'cid3', 50, 'text/plain', 'etag3', copies)
+
+      store.copyObject('default', 'with-copies.txt', 'default', 'cloned.txt')
+
+      const dstCopies = store.getObjectCopies('default', 'cloned.txt')
+      expect(dstCopies).toHaveLength(1)
+      expect(dstCopies[0]?.providerId).toBe('42')
+      expect(dstCopies[0]?.retrievalUrl).toBe('https://sp1.example.com/baga1')
+    })
+
+    it('returns undefined for non-existent source', () => {
+      const result = store.copyObject('default', 'no-such-file.txt', 'default', 'dst.txt')
+      expect(result).toBeUndefined()
+    })
+
+    it('overwrites existing destination', () => {
+      store.putObject('default', 'old.txt', 'cid-old', 10, 'text/plain', 'etag-old')
+      store.putObject('default', 'new.txt', 'cid-new', 20, 'text/plain', 'etag-new')
+
+      store.copyObject('default', 'new.txt', 'default', 'old.txt')
+
+      expect(store.getObject('default', 'old.txt')?.pieceCid).toBe('cid-new')
+    })
+  })
+
   // ── Basic CRUD ──────────────────────────────────────────────────────
 
   describe('putObject / getObject', () => {

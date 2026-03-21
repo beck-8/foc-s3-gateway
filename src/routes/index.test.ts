@@ -254,6 +254,65 @@ describe('S3 Routes', () => {
     })
   })
 
+  // ── CopyObject: PUT /{bucket}/{key} + x-amz-copy-source ────────────
+
+  describe('PUT /:bucket/* with x-amz-copy-source (CopyObject)', () => {
+    it('copies object within same bucket (rename)', async () => {
+      metadataStore.putObject('default', 'old-name.txt', 'cid1', 100, 'text/plain', 'etag1')
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/new-name.txt',
+        headers: { 'x-amz-copy-source': '/default/old-name.txt' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('<CopyObjectResult>')
+      expect(response.body).toContain('<ETag>')
+
+      // Destination created, source still exists
+      expect(metadataStore.getObject('default', 'new-name.txt')?.pieceCid).toBe('cid1')
+      expect(metadataStore.getObject('default', 'old-name.txt')).toBeDefined()
+    })
+
+    it('copies across buckets', async () => {
+      await app.inject({ method: 'PUT', url: '/archive' })
+      metadataStore.putObject('default', 'report.pdf', 'cid2', 200, 'application/pdf', 'etag2')
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/archive/report.pdf',
+        headers: { 'x-amz-copy-source': 'default/report.pdf' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(metadataStore.getObject('archive', 'report.pdf')?.pieceCid).toBe('cid2')
+    })
+
+    it('returns 404 for non-existent source', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/dst.txt',
+        headers: { 'x-amz-copy-source': '/default/nonexistent.txt' },
+      })
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body).toContain('NoSuchKey')
+    })
+
+    it('does not call synapse upload', async () => {
+      metadataStore.putObject('default', 'src.txt', 'cid', 10, 'text/plain', 'etag')
+
+      await app.inject({
+        method: 'PUT',
+        url: '/default/dst.txt',
+        headers: { 'x-amz-copy-source': '/default/src.txt' },
+      })
+
+      expect(mockSynapse.upload).not.toHaveBeenCalled()
+    })
+  })
+
   // ── GetObject: GET /{bucket}/{key} ──────────────────────────────────
 
   describe('GET /:bucket/* (GetObject)', () => {
