@@ -71,7 +71,7 @@ export async function createServer(options: ServerOptions) {
     app.addHook('preHandler', authHook)
     logger.info('authentication enabled')
   } else {
-    logger.warn('no access key / secret key configured — running WITHOUT authentication')
+    logger.warn('no access key / secret key configured -- running WITHOUT authentication')
   }
 
   // Register S3 routes
