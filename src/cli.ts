@@ -37,7 +37,7 @@ program
       host: options.host,
       privateKey,
       rpcUrl,
-      dbPath: options.dbPath,
+      dbPath: options.dbPath ?? process.env['DB_PATH'],
     })
   })
 

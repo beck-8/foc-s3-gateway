@@ -33,6 +33,11 @@ export class MetadataStore {
     this.logger = options.logger.child({ module: 'metadata-store' })
     this.db = new Database(options.dbPath)
     this.db.pragma('journal_mode = WAL')
+    this.db.pragma('synchronous = NORMAL')
+    this.db.pragma('cache_size = -20000')
+    this.db.pragma('busy_timeout = 5000')
+    this.db.pragma('temp_store = MEMORY')
+    this.db.pragma('mmap_size = 268435456')
     this.initSchema()
   }
 

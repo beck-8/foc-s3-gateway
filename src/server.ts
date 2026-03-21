@@ -2,6 +2,8 @@
  * Fastify server that serves S3-compatible API over FOC storage.
  */
 
+import { mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import path from 'node:path'
 import Fastify from 'fastify'
 import type { Logger } from 'pino'
@@ -33,8 +35,10 @@ export async function createServer(options: ServerOptions) {
 
   const logger = app.log as Logger
 
-  // Default database path
-  const dbPath = options.dbPath ?? path.join(process.cwd(), 'foc-s3-gateway.db')
+  // Resolve database path — use platform-specific data dir by default
+  const dbPath = options.dbPath ?? getDefaultDbPath()
+  mkdirSync(path.dirname(dbPath), { recursive: true })
+  logger.info({ dbPath }, 'using database')
 
   // Initialize storage
   const metadataStore = new MetadataStore({ dbPath, logger })
@@ -95,5 +99,20 @@ export async function startServer(options: ServerOptions): Promise<void> {
   } catch (error) {
     app.log.error(error)
     process.exit(1)
+  }
+}
+
+/** Platform-specific default data directory for the database */
+function getDefaultDbPath(): string {
+  const appName = 'foc-s3-gateway'
+
+  switch (process.platform) {
+    case 'darwin':
+      return path.join(homedir(), 'Library', 'Application Support', appName, 'metadata.db')
+    case 'win32':
+      return path.join(process.env['APPDATA'] ?? path.join(homedir(), 'AppData', 'Roaming'), appName, 'metadata.db')
+    default:
+      // Linux / other — follow XDG Base Directory spec
+      return path.join(process.env['XDG_DATA_HOME'] ?? path.join(homedir(), '.local', 'share'), appName, 'metadata.db')
   }
 }
