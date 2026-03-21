@@ -6,10 +6,10 @@
  */
 
 import { Synapse } from '@filoz/synapse-sdk'
+import { calibration, mainnet } from '@filoz/synapse-core/chains'
 import type { Logger } from 'pino'
 import { type Hex, createWalletClient, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { filecoin, filecoinCalibration } from 'viem/chains'
 
 export interface SynapseClientOptions {
   privateKey: string
@@ -51,7 +51,7 @@ export class SynapseClient {
     if (this.synapse) return this.synapse
 
     const account = privateKeyToAccount(this.privateKey as Hex)
-    const chain = this.network === 'mainnet' ? filecoin : filecoinCalibration
+    const chain = this.network === 'mainnet' ? mainnet : calibration
     const transport = this.rpcUrl ? http(this.rpcUrl) : http()
 
     const client = createWalletClient({
