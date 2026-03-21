@@ -20,6 +20,7 @@ import { sendInternalError, sendNoSuchBucket, sendNoSuchKey, sendS3Error } from 
 import {
   buildCompleteMultipartUploadXml,
   buildCopyObjectResultXml,
+  buildDeleteResultXml,
   buildInitiateMultipartUploadXml,
   buildListBucketsXml,
   buildListObjectsV2Xml,
@@ -157,7 +158,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     reply.status(204).send()
   })
 
-  // ── ListObjectsV2 / GetBucketLocation: GET /{bucket} ────────────────
+  // ── ListObjectsV2 / GetBucketLocation / GetBucketVersioning: GET /{bucket}
   app.get('/:bucket', async (request, reply) => {
     const { bucket } = request.params as { bucket: string }
     const query = request.query as Record<string, string>
@@ -172,6 +173,14 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       logger.debug({ bucket }, 'GetBucketLocation')
       reply.header('Content-Type', 'application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`)
+      return
+    }
+
+    // GetBucketVersioning: GET /bucket?versioning (many S3 clients check this)
+    if ('versioning' in query) {
+      logger.debug({ bucket }, 'GetBucketVersioning')
+      reply.header('Content-Type', 'application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`)
       return
     }
 
@@ -213,6 +222,18 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.head('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
+
+    // Trailing slash: HEAD /bucket/ → treat as HeadBucket
+    if (!key) {
+      logger.debug({ bucket }, 'HeadBucket (trailing slash)')
+      if (!metadataStore.bucketExists(bucket)) {
+        sendNoSuchBucket(reply, bucket)
+        return
+      }
+      reply.status(200).header('x-amz-bucket-region', 'us-east-1').send()
+      return
+    }
+
     logger.debug({ bucket, key }, 'HeadObject')
 
     if (!metadataStore.bucketExists(bucket)) {
@@ -232,6 +253,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       .header('Content-Length', obj.size)
       .header('ETag', `"${obj.etag}"`)
       .header('Last-Modified', new Date(obj.lastModified).toUTCString())
+      .header('Accept-Ranges', 'bytes')
       .send()
   })
 
@@ -304,6 +326,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           'Content-Length': obj.size,
           ETag: `"${obj.etag}"`,
           'Last-Modified': new Date(obj.lastModified).toUTCString(),
+          'Accept-Ranges': 'bytes',
         })
         fileStream.pipe(reply.raw)
         return
@@ -318,6 +341,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         'Content-Length': obj.size,
         ETag: `"${obj.etag}"`,
         'Last-Modified': new Date(obj.lastModified).toUTCString(),
+        'Accept-Ranges': 'bytes',
       })
       stream.pipe(reply.raw)
     } catch (error) {
@@ -326,11 +350,81 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
   })
 
+  // ── POST /{bucket}: DeleteObjects (batch delete) ──────────────────
+  app.post('/:bucket', async (request, reply) => {
+    const { bucket } = request.params as { bucket: string }
+    const query = request.query as Record<string, string>
+
+    if (!metadataStore.bucketExists(bucket)) {
+      sendNoSuchBucket(reply, bucket)
+      return
+    }
+
+    // ── DeleteObjects: POST /{bucket}?delete ─────────────────────────
+    if ('delete' in query) {
+      logger.debug({ bucket }, 'DeleteObjects')
+
+      // Parse XML body: <Delete><Object><Key>k</Key></Object>...</Delete>
+      const body = (request.body as string) ?? ''
+      const keyMatches = body.match(/<Key>([^<]+)<\/Key>/g) ?? []
+      const keys = keyMatches.map((m) => {
+        const inner = m.replace(/<Key>/, '').replace(/<\/Key>/, '')
+        return decodeURIComponent(inner)
+      })
+
+      const deleted: string[] = []
+      for (const key of keys) {
+        // Clean up local file if staged
+        const localPath = metadataStore.getLocalPath(bucket, key)
+        if (localPath) {
+          localStore.delete(localPath)
+        }
+        metadataStore.deleteObject(bucket, key)
+        deleted.push(key)
+      }
+
+      const xml = buildDeleteResultXml(deleted, [])
+      reply.header('Content-Type', 'application/xml').send(xml)
+      return
+    }
+
+    sendS3Error(reply, 400, 'InvalidRequest', 'Unknown POST operation on bucket', bucket)
+  })
+
   // ── POST /{bucket}/{key+}: InitiateMultipartUpload / CompleteMultipartUpload ──
   app.post('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
     const query = request.query as Record<string, string>
+
+    // Trailing slash: POST /bucket/ → treat as bucket-level POST (batch delete)
+    if (!key) {
+      if (!metadataStore.bucketExists(bucket)) {
+        sendNoSuchBucket(reply, bucket)
+        return
+      }
+      if ('delete' in query) {
+        logger.debug({ bucket }, 'DeleteObjects (trailing slash)')
+        const body = (request.body as string) ?? ''
+        const keyMatches = body.match(/<Key>([^<]+)<\/Key>/g) ?? []
+        const keys = keyMatches.map((m) => {
+          const inner = m.replace(/<Key>/, '').replace(/<\/Key>/, '')
+          return decodeURIComponent(inner)
+        })
+        const deleted: string[] = []
+        for (const k of keys) {
+          const localPath = metadataStore.getLocalPath(bucket, k)
+          if (localPath) localStore.delete(localPath)
+          metadataStore.deleteObject(bucket, k)
+          deleted.push(k)
+        }
+        const xml = buildDeleteResultXml(deleted, [])
+        reply.header('Content-Type', 'application/xml').send(xml)
+        return
+      }
+      sendS3Error(reply, 400, 'InvalidRequest', 'Unknown POST operation on bucket', bucket)
+      return
+    }
 
     if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
@@ -559,6 +653,22 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
     const query = request.query as Record<string, string>
+
+    // Trailing slash: DELETE /bucket/ → treat as DeleteBucket
+    if (!key) {
+      logger.debug({ bucket }, 'DeleteBucket (trailing slash)')
+      if (!metadataStore.bucketExists(bucket)) {
+        sendNoSuchBucket(reply, bucket)
+        return
+      }
+      const deleted = metadataStore.deleteBucket(bucket)
+      if (!deleted) {
+        sendS3Error(reply, 409, 'BucketNotEmpty', 'The bucket you tried to delete is not empty.', bucket)
+        return
+      }
+      reply.status(204).send()
+      return
+    }
 
     if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
