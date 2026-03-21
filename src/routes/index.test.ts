@@ -5,9 +5,13 @@
  * request parsing, and response formatting, not the SDK itself.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import Fastify from 'fastify'
 import pino from 'pino'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LocalStore } from '../storage/local-store.js'
 import { MetadataStore } from '../storage/metadata-store.js'
 import { registerRoutes } from './index.js'
 
@@ -42,21 +46,27 @@ describe('S3 Routes', () => {
   let app: ReturnType<typeof Fastify>
   let metadataStore: MetadataStore
   let mockSynapse: ReturnType<typeof createMockSynapseClient>
+  let localStore: LocalStore
+  let tempDir: string
 
   beforeEach(async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), 's3-routes-test-'))
+
     app = Fastify({ logger: false })
     metadataStore = new MetadataStore({ dbPath: ':memory:', logger })
     mockSynapse = createMockSynapseClient()
+    localStore = new LocalStore({ dataDir: tempDir, logger })
 
     // Disable body parsing so PutObject can read raw
     app.removeAllContentTypeParsers()
-    app.addContentTypeParser('*', (_request, _payload, done) => {
+    app.addContentTypeParser('*', (_request: any, _payload: any, done: (err: null) => void) => {
       done(null)
     })
 
     registerRoutes(app, {
       metadataStore,
       synapseClient: mockSynapse as any,
+      localStore,
       logger,
     })
   })
@@ -64,6 +74,7 @@ describe('S3 Routes', () => {
   afterEach(async () => {
     metadataStore.close()
     await app.close()
+    rmSync(tempDir, { recursive: true, force: true })
   })
 
   // ── ListBuckets: GET / ──────────────────────────────────────────────
@@ -224,9 +235,10 @@ describe('S3 Routes', () => {
   })
 
   // ── PutObject: PUT /{bucket}/{key} ──────────────────────────────────
+  //    Now stages to disk and returns immediately (async upload)
 
-  describe('PUT /:bucket/* (PutObject)', () => {
-    it('uploads and stores metadata', async () => {
+  describe('PUT /:bucket/* (PutObject — async)', () => {
+    it('stages upload to disk and returns immediately', async () => {
       const payload = 'x'.repeat(128) // Must be >= 127 bytes (Filecoin SP minimum)
       const response = await app.inject({
         method: 'PUT',
@@ -238,13 +250,18 @@ describe('S3 Routes', () => {
       expect(response.statusCode).toBe(200)
       expect(response.headers['etag']).toBeDefined()
 
-      // Verify synapse upload was called
-      expect(mockSynapse.upload).toHaveBeenCalledOnce()
+      // Synapse upload should NOT have been called (async, deferred)
+      expect(mockSynapse.upload).not.toHaveBeenCalled()
 
-      // Verify metadata was stored
+      // Metadata should be stored with status=pending
       const obj = metadataStore.getObject('default', 'hello.txt')
       expect(obj).toBeDefined()
-      expect(obj?.pieceCid).toBe('baga-test-cid')
+      expect(obj?.size).toBe(128)
+
+      // Local path should be set
+      const localPath = metadataStore.getLocalPath('default', 'hello.txt')
+      expect(localPath).toBeDefined()
+      expect(localStore.exists(localPath!)).toBe(true)
     })
 
     it('returns 404 for invalid bucket', async () => {
@@ -255,19 +272,6 @@ describe('S3 Routes', () => {
       })
 
       expect(response.statusCode).toBe(404)
-    })
-
-    it('returns 500 on upload failure', async () => {
-      mockSynapse.upload.mockRejectedValueOnce(new Error('Network error'))
-
-      const response = await app.inject({
-        method: 'PUT',
-        url: '/default/fail.txt',
-        payload: 'x'.repeat(128),
-      })
-
-      expect(response.statusCode).toBe(500)
-      expect(response.body).toContain('InternalError')
     })
 
     it('rejects files smaller than 127 bytes', async () => {
@@ -345,7 +349,7 @@ describe('S3 Routes', () => {
   // ── GetObject: GET /{bucket}/{key} ──────────────────────────────────
 
   describe('GET /:bucket/* (GetObject)', () => {
-    it('downloads stored object', async () => {
+    it('downloads stored object from FOC', async () => {
       metadataStore.putObject('default', 'hello.txt', 'baga-cid', 5, 'text/plain', 'etag1')
 
       const response = await app.inject({ method: 'GET', url: '/default/hello.txt' })
@@ -355,6 +359,25 @@ describe('S3 Routes', () => {
       expect(response.headers['etag']).toBe('"etag1"')
       expect(mockSynapse.download).toHaveBeenCalledWith('baga-cid', [])
       expect(response.body).toBe('Hello')
+    })
+
+    it('serves from local disk when available (local-first)', async () => {
+      // Stage a file via PutObject
+      const payload = 'x'.repeat(128)
+      await app.inject({
+        method: 'PUT',
+        url: '/default/local.txt',
+        payload,
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      // GetObject should serve from local disk, not FOC
+      const response = await app.inject({ method: 'GET', url: '/default/local.txt' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toBe(payload)
+      // Should NOT have called synapse download
+      expect(mockSynapse.download).not.toHaveBeenCalled()
     })
 
     it('returns 404 for non-existent object', async () => {
@@ -425,6 +448,149 @@ describe('S3 Routes', () => {
       const response = await app.inject({ method: 'DELETE', url: '/nonexistent/file.txt' })
 
       expect(response.statusCode).toBe(404)
+    })
+
+    it('cleans up local file on delete of staged object', async () => {
+      // Stage a file
+      await app.inject({
+        method: 'PUT',
+        url: '/default/staged.txt',
+        payload: 'x'.repeat(128),
+      })
+
+      const localPath = metadataStore.getLocalPath('default', 'staged.txt')
+      expect(localPath).toBeDefined()
+      expect(localStore.exists(localPath!)).toBe(true)
+
+      // Delete it
+      await app.inject({ method: 'DELETE', url: '/default/staged.txt' })
+
+      // Local file should be gone
+      expect(localStore.exists(localPath!)).toBe(false)
+    })
+  })
+
+  // ── Multipart Upload ────────────────────────────────────────────────
+
+  describe('Multipart Upload', () => {
+    it('InitiateMultipartUpload returns uploadId', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/default/big.bin?uploads=',
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['content-type']).toContain('application/xml')
+      expect(response.body).toContain('<InitiateMultipartUploadResult')
+      expect(response.body).toContain('<UploadId>')
+      expect(response.body).toContain('<Bucket>default</Bucket>')
+      expect(response.body).toContain('<Key>big.bin</Key>')
+    })
+
+    it('full multipart flow: initiate → upload parts → complete', async () => {
+      // 1. Initiate
+      const initResp = await app.inject({
+        method: 'POST',
+        url: '/default/multi.txt?uploads=',
+      })
+      expect(initResp.statusCode).toBe(200)
+
+      // Extract uploadId from XML
+      const uploadIdMatch = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)
+      expect(uploadIdMatch).toBeTruthy()
+      const uploadId = uploadIdMatch![1]
+
+      // 2. Upload parts (~128 bytes each, well above minimum when combined)
+      const part1Data = 'A'.repeat(128)
+      const part1 = await app.inject({
+        method: 'PUT',
+        url: `/default/multi.txt?partNumber=1&uploadId=${uploadId}`,
+        payload: part1Data,
+      })
+      expect(part1.statusCode).toBe(200)
+      expect(part1.headers['etag']).toBeDefined()
+
+      const part2Data = 'B'.repeat(128)
+      const part2 = await app.inject({
+        method: 'PUT',
+        url: `/default/multi.txt?partNumber=2&uploadId=${uploadId}`,
+        payload: part2Data,
+      })
+      expect(part2.statusCode).toBe(200)
+
+      // 3. Complete
+      const completeResp = await app.inject({
+        method: 'POST',
+        url: `/default/multi.txt?uploadId=${uploadId}`,
+        payload: '<CompleteMultipartUpload></CompleteMultipartUpload>',
+      })
+      expect(completeResp.statusCode).toBe(200)
+      expect(completeResp.body).toContain('<CompleteMultipartUploadResult')
+      expect(completeResp.body).toContain('<ETag>')
+
+      // Object should exist in metadata
+      const obj = metadataStore.getObject('default', 'multi.txt')
+      expect(obj).toBeDefined()
+      expect(obj?.size).toBe(256) // 128 + 128
+
+      // Should be staged for async upload (not directly uploaded)
+      expect(mockSynapse.upload).not.toHaveBeenCalled()
+      const localPath = metadataStore.getLocalPath('default', 'multi.txt')
+      expect(localPath).toBeDefined()
+    })
+
+    it('AbortMultipartUpload cleans up', async () => {
+      // Initiate
+      const initResp = await app.inject({
+        method: 'POST',
+        url: '/default/aborted.txt?uploads=',
+      })
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+
+      // Upload a part
+      await app.inject({
+        method: 'PUT',
+        url: `/default/aborted.txt?partNumber=1&uploadId=${uploadId}`,
+        payload: 'x'.repeat(128),
+      })
+
+      // Abort
+      const abortResp = await app.inject({
+        method: 'DELETE',
+        url: `/default/aborted.txt?uploadId=${uploadId}`,
+      })
+      expect(abortResp.statusCode).toBe(204)
+
+      // Upload session should be gone
+      expect(metadataStore.getMultipartUpload(uploadId)).toBeUndefined()
+    })
+
+    it('returns 404 for non-existent uploadId on UploadPart', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/file.txt?partNumber=1&uploadId=fake-id',
+        payload: 'data',
+      })
+      expect(response.statusCode).toBe(404)
+      expect(response.body).toContain('NoSuchUpload')
+    })
+
+    it('returns 404 for non-existent uploadId on Complete', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/default/file.txt?uploadId=fake-id',
+      })
+      expect(response.statusCode).toBe(404)
+      expect(response.body).toContain('NoSuchUpload')
+    })
+
+    it('returns 404 for non-existent bucket on Initiate', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/nonexistent/file.txt?uploads=',
+      })
+      expect(response.statusCode).toBe(404)
+      expect(response.body).toContain('NoSuchBucket')
     })
   })
 })

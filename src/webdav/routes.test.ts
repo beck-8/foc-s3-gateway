@@ -2,9 +2,13 @@
  * Tests for WebDAV routes.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import pino from 'pino'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LocalStore } from '../storage/local-store.js'
 import { MetadataStore } from '../storage/metadata-store.js'
 import { createWebDavServer } from './server.js'
 
@@ -13,6 +17,8 @@ const logger = pino({ level: 'silent' })
 describe('WebDAV Routes', () => {
   let app: FastifyInstance
   let metadataStore: MetadataStore
+  let localStore: LocalStore
+  let tempDir: string
 
   const mockSynapse = {
     upload: vi.fn().mockImplementation(async (data: Uint8Array | ReadableStream<Uint8Array>) => {
@@ -36,13 +42,16 @@ describe('WebDAV Routes', () => {
   }
 
   beforeEach(async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), 'webdav-test-'))
     metadataStore = new MetadataStore({ dbPath: ':memory:', logger })
+    localStore = new LocalStore({ dataDir: tempDir, logger })
 
     app = await createWebDavServer({
       port: 0,
       host: '127.0.0.1',
       metadataStore,
       synapseClient: mockSynapse as any,
+      localStore,
       logger,
     })
   })
@@ -50,6 +59,7 @@ describe('WebDAV Routes', () => {
   afterEach(async () => {
     metadataStore.close()
     await app.close()
+    rmSync(tempDir, { recursive: true, force: true })
   })
 
   // ── OPTIONS ──────────────────────────────────────────────────────────
@@ -153,11 +163,17 @@ describe('WebDAV Routes', () => {
       })
 
       expect(response.statusCode).toBe(201)
-      expect(mockSynapse.upload).toHaveBeenCalled()
+
+      // Async: synapse upload should NOT have been called (deferred to worker)
+      expect(mockSynapse.upload).not.toHaveBeenCalled()
 
       const obj = metadataStore.getObject('default', 'new-file.txt')
       expect(obj).toBeDefined()
-      expect(obj?.pieceCid).toBe('baga-test')
+      expect(obj?.size).toBe(128)
+
+      // Should be staged locally
+      const localPath = metadataStore.getLocalPath('default', 'new-file.txt')
+      expect(localPath).toBeDefined()
     })
 
     it('rejects files smaller than 127 bytes', async () => {

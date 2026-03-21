@@ -8,6 +8,7 @@
 import Fastify from 'fastify'
 import type { Logger } from 'pino'
 import { createAuthHook } from '../auth/index.js'
+import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
 import { registerWebDavRoutes } from './routes.js'
@@ -17,6 +18,7 @@ export interface WebDavServerOptions {
   host: string
   metadataStore: MetadataStore
   synapseClient: SynapseClient
+  localStore: LocalStore
   logger: Logger
   accessKey?: string | undefined
   secretKey?: string | undefined
@@ -63,6 +65,7 @@ export async function createWebDavServer(options: WebDavServerOptions) {
   registerWebDavRoutes(app, {
     metadataStore: options.metadataStore,
     synapseClient: options.synapseClient,
+    localStore: options.localStore,
     logger: app.log as Logger,
   })
 

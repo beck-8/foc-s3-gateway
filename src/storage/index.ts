@@ -1,4 +1,8 @@
+export type { LocalStoreOptions, StageResult } from './local-store.js'
+export { LocalStore } from './local-store.js'
 export type { MetadataStoreOptions, PutObjectOptions } from './metadata-store.js'
 export { MetadataStore } from './metadata-store.js'
 export type { CopyInfo, SynapseClientOptions, UploadResult } from './synapse-client.js'
 export { SynapseClient } from './synapse-client.js'
+export type { UploadWorkerOptions } from './upload-worker.js'
+export { UploadWorker } from './upload-worker.js'

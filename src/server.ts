@@ -10,8 +10,10 @@ import type { Logger } from 'pino'
 import { createAuthHook } from './auth/index.js'
 import { registerRoutes } from './routes/index.js'
 import { CleanupWorker } from './storage/cleanup-worker.js'
+import { LocalStore } from './storage/local-store.js'
 import { MetadataStore } from './storage/metadata-store.js'
 import { SynapseClient } from './storage/synapse-client.js'
+import { UploadWorker } from './storage/upload-worker.js'
 import { startWebDavServer } from './webdav/server.js'
 
 export interface ServerOptions {
@@ -47,7 +49,8 @@ export async function createServer(options: ServerOptions) {
 
   // Resolve database path — use platform-specific data dir by default
   const dbPath = options.dbPath ?? getDefaultDbPath()
-  mkdirSync(path.dirname(dbPath), { recursive: true })
+  const dataDir = path.dirname(dbPath)
+  mkdirSync(dataDir, { recursive: true })
   logger.info({ dbPath }, 'using database')
 
   // Initialize storage
@@ -58,6 +61,7 @@ export async function createServer(options: ServerOptions) {
     network: options.network,
     logger,
   })
+  const localStore = new LocalStore({ dataDir, logger })
 
   // Disable Fastify's default content type parser for all types
   // so we can handle raw request bodies ourselves
@@ -80,24 +84,31 @@ export async function createServer(options: ServerOptions) {
   }
 
   // Register S3 routes
-  registerRoutes(app, { metadataStore, synapseClient, logger })
+  registerRoutes(app, { metadataStore, synapseClient, localStore, logger })
 
   const cleanupWorker = new CleanupWorker({ metadataStore, synapseClient, logger })
+  const uploadWorker = new UploadWorker({ metadataStore, synapseClient, localStore, logger })
+
+  // Clean up orphaned staging files on startup
+  const knownPaths = metadataStore.getAllLocalPaths()
+  localStore.cleanupOrphans(knownPaths)
 
   // Graceful shutdown
   app.addHook('onClose', () => {
+    uploadWorker.stop()
     cleanupWorker.stop()
     metadataStore.close()
   })
 
-  return { app, metadataStore, synapseClient, cleanupWorker }
+  return { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker }
 }
 
 export async function startServer(options: ServerOptions): Promise<void> {
-  const { app, metadataStore, synapseClient, cleanupWorker } = await createServer(options)
+  const { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker } = await createServer(options)
 
   try {
     cleanupWorker.start()
+    uploadWorker.start()
     await app.listen({ port: options.port, host: options.host })
 
     const address = app.server.address()
@@ -110,6 +121,7 @@ export async function startServer(options: ServerOptions): Promise<void> {
       host: options.host,
       metadataStore,
       synapseClient,
+      localStore,
       logger: app.log as Logger,
       accessKey: options.accessKey,
       secretKey: options.secretKey,

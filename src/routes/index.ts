@@ -2,24 +2,96 @@
  * S3 route handlers — the core logic mapping S3 operations to FOC storage.
  *
  * Each handler receives Fastify request/reply + shared context (metadata store + synapse client).
+ *
+ * Upload flow (async):
+ *   PutObject → save to local disk → return 200 immediately → UploadWorker sends to FOC later
+ *
+ * Multipart upload flow:
+ *   InitiateMultipartUpload → UploadPart (×N) → CompleteMultipartUpload → merge on disk → async FOC upload
+ *
+ * Download flow (local-first):
+ *   GetObject → try local disk → try SP direct URLs → fall back to SDK discovery
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import type { Logger } from 'pino'
 import { sendInternalError, sendNoSuchBucket, sendNoSuchKey, sendS3Error } from '../s3/errors.js'
-import { buildCopyObjectResultXml, buildListBucketsXml, buildListObjectsV2Xml } from '../s3/xml.js'
+import {
+  buildCompleteMultipartUploadXml,
+  buildCopyObjectResultXml,
+  buildInitiateMultipartUploadXml,
+  buildListBucketsXml,
+  buildListObjectsV2Xml,
+} from '../s3/xml.js'
+import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
 
 export interface RouteContext {
   metadataStore: MetadataStore
   synapseClient: SynapseClient
+  localStore: LocalStore
   logger: Logger
 }
 
+/** Minimum file size for FOC storage providers */
+const MIN_UPLOAD_SIZE = 127
+/** Maximum upload size (~1 GiB with fr32 expansion) */
+const MAX_UPLOAD_SIZE = 1_065_353_216
+
+/** Format bytes to human-readable string (e.g. "1.5 GB") */
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const k = 1024
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  const value = bytes / k ** i
+  return `${value < 10 ? value.toFixed(2) : value < 100 ? value.toFixed(1) : Math.round(value)} ${units[i]}`
+}
+
+/** Add a human-friendly `sizeFormatted` field to a status item */
+function addFormattedSize<T extends { size: number }>(item: T): T & { sizeFormatted: string } {
+  return { ...item, sizeFormatted: formatBytes(item.size) }
+}
+
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
-  const { metadataStore, synapseClient, logger } = ctx
+  const { metadataStore, synapseClient, localStore, logger } = ctx
+
+  // ── Upload status: GET /_/status ────────────────────────────────────
+  //    Not an S3 API — gateway-specific endpoint for monitoring upload queue.
+  app.get('/_/status', async (request, reply) => {
+    const query = request.query as Record<string, string>
+    const stats = metadataStore.getUploadStats()
+    const diskStats = localStore.getDiskStats()
+    const multipartCount = metadataStore.countAllMultipartUploads()
+
+    const result: Record<string, unknown> = {
+      uploads: stats,
+      disk: {
+        staging: {
+          files: diskStats.staging.count,
+          totalBytes: diskStats.staging.totalBytes,
+          totalSize: formatBytes(diskStats.staging.totalBytes),
+        },
+        multipartParts: {
+          files: diskStats.multipart.count,
+          totalBytes: diskStats.multipart.totalBytes,
+          totalSize: formatBytes(diskStats.multipart.totalBytes),
+        },
+      },
+      multipartUploads: multipartCount,
+    }
+
+    // ?detail=true → include object lists for pending/uploading/failed
+    if (query['detail'] === 'true') {
+      result.pending = metadataStore.getObjectsByStatus('pending').map(addFormattedSize)
+      result.uploading = metadataStore.getObjectsByStatus('uploading').map(addFormattedSize)
+      result.failed = metadataStore.getObjectsByStatus('failed').map(addFormattedSize)
+    }
+
+    reply.header('Content-Type', 'application/json').send(result)
+  })
 
   // ── ListBuckets: GET / ──────────────────────────────────────────────
   app.get('/', async (_request, reply) => {
@@ -184,11 +256,25 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const maxKeys = Math.min(Number.parseInt(query['max-keys'] ?? '1000', 10), 1000)
       const startAfter = query['start-after'] ?? query['continuation-token']
 
-      const { objects, commonPrefixes, isTruncated } = metadataStore.listObjects(bucket, prefix, delimiter, maxKeys, startAfter)
+      const { objects, commonPrefixes, isTruncated } = metadataStore.listObjects(
+        bucket,
+        prefix,
+        delimiter,
+        maxKeys,
+        startAfter
+      )
       const lastKey = objects[objects.length - 1]?.key
       const nextToken = isTruncated && lastKey ? lastKey : undefined
 
-      const response = { name: bucket, prefix, maxKeys, isTruncated, contents: objects, commonPrefixes, keyCount: objects.length }
+      const response = {
+        name: bucket,
+        prefix,
+        maxKeys,
+        isTruncated,
+        contents: objects,
+        commonPrefixes,
+        keyCount: objects.length,
+      }
       const xml = buildListObjectsV2Xml(nextToken ? { ...response, nextContinuationToken: nextToken } : response)
       reply.header('Content-Type', 'application/xml').send(xml)
       return
@@ -208,7 +294,22 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
 
     try {
-      // Get stored copy URLs for direct download (primary → secondary → SDK fallback)
+      // Local-first: try local disk before going to FOC
+      const localPath = metadataStore.getLocalPath(bucket, key)
+      if (localPath && localStore.exists(localPath)) {
+        logger.debug({ bucket, key, localPath }, 'serving from local disk')
+        const fileStream = localStore.createReadStream(localPath)
+        reply.raw.writeHead(200, {
+          'Content-Type': obj.contentType,
+          'Content-Length': obj.size,
+          ETag: `"${obj.etag}"`,
+          'Last-Modified': new Date(obj.lastModified).toUTCString(),
+        })
+        fileStream.pipe(reply.raw)
+        return
+      }
+
+      // Fall back to FOC download (direct SP URLs → SDK discovery)
       const copies = metadataStore.getObjectCopies(bucket, key)
       const { stream } = await synapseClient.download(obj.pieceCid, copies)
 
@@ -225,13 +326,115 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
   })
 
-  // ── PutObject / CopyObject: PUT /{bucket}/{key+} ──────────────────
-  app.put('/:bucket/*', async (request, reply) => {
+  // ── POST /{bucket}/{key+}: InitiateMultipartUpload / CompleteMultipartUpload ──
+  app.post('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
+    const query = request.query as Record<string, string>
 
     if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
+      return
+    }
+
+    // ── InitiateMultipartUpload: POST /{bucket}/{key}?uploads ─────────
+    if ('uploads' in query && !('uploadId' in query)) {
+      logger.debug({ bucket, key }, 'InitiateMultipartUpload')
+
+      const uploadId = randomUUID()
+      const contentType = (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
+      metadataStore.createMultipartUpload(uploadId, bucket, key, contentType)
+
+      const xml = buildInitiateMultipartUploadXml(bucket, key, uploadId)
+      reply.header('Content-Type', 'application/xml').send(xml)
+      return
+    }
+
+    // ── CompleteMultipartUpload: POST /{bucket}/{key}?uploadId=X ──────
+    if ('uploadId' in query) {
+      const uploadId = query['uploadId']
+      logger.debug({ bucket, key, uploadId }, 'CompleteMultipartUpload')
+
+      const upload = metadataStore.getMultipartUpload(uploadId)
+      if (!upload) {
+        sendS3Error(reply, 404, 'NoSuchUpload', 'The specified multipart upload does not exist.', key)
+        return
+      }
+
+      const parts = metadataStore.getMultipartParts(uploadId)
+      if (parts.length === 0) {
+        sendS3Error(reply, 400, 'InvalidRequest', 'You must specify at least one part.', key)
+        return
+      }
+
+      try {
+        // Merge parts into a single staged file
+        const partNumbers = parts.map((p) => p.partNumber)
+        const merged = await localStore.mergeParts(uploadId, partNumbers)
+
+        // Validate merged size
+        if (merged.size < MIN_UPLOAD_SIZE) {
+          localStore.delete(merged.localPath)
+          metadataStore.deleteMultipartUpload(uploadId)
+          sendS3Error(
+            reply,
+            400,
+            'EntityTooSmall',
+            `Object size ${merged.size} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`,
+            key
+          )
+          return
+        }
+
+        // Stage for async FOC upload
+        metadataStore.stageObject(bucket, key, merged.size, upload.contentType, merged.etag, merged.localPath)
+        metadataStore.deleteMultipartUpload(uploadId)
+
+        const xml = buildCompleteMultipartUploadXml(bucket, key, merged.etag)
+        reply.header('Content-Type', 'application/xml').send(xml)
+      } catch (error) {
+        logger.error({ error, bucket, key, uploadId }, 'CompleteMultipartUpload failed')
+        sendInternalError(reply, 'Failed to complete multipart upload')
+      }
+      return
+    }
+
+    // Unknown POST
+    sendS3Error(reply, 400, 'InvalidRequest', 'Unknown POST operation', key)
+  })
+
+  // ── PutObject / CopyObject / UploadPart: PUT /{bucket}/{key+} ──────
+  app.put('/:bucket/*', async (request, reply) => {
+    const { bucket } = request.params as { bucket: string; '*': string }
+    const key = (request.params as { '*': string })['*']
+    const query = request.query as Record<string, string>
+
+    if (!metadataStore.bucketExists(bucket)) {
+      sendNoSuchBucket(reply, bucket)
+      return
+    }
+
+    // ── UploadPart: PUT /{bucket}/{key}?partNumber=N&uploadId=X ──────
+    if ('partNumber' in query && 'uploadId' in query) {
+      const partNumber = Number.parseInt(query['partNumber'], 10)
+      const uploadId = query['uploadId']
+      logger.debug({ bucket, key, uploadId, partNumber }, 'UploadPart')
+
+      const upload = metadataStore.getMultipartUpload(uploadId)
+      if (!upload) {
+        sendS3Error(reply, 404, 'NoSuchUpload', 'The specified multipart upload does not exist.', key)
+        return
+      }
+
+      try {
+        const result = await localStore.savePart(uploadId, partNumber, request.raw)
+        metadataStore.addMultipartPart(uploadId, partNumber, result.localPath, result.size, result.etag)
+
+        reply.status(200).header('ETag', `"${result.etag}"`).send()
+      } catch (error) {
+        logger.error({ error, uploadId, partNumber }, 'UploadPart failed')
+        sendInternalError(reply, 'Failed to upload part')
+      }
       return
     }
 
@@ -266,7 +469,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return
     }
 
-    // ── PutObject: regular upload ────────────────────────────────
+    // ── PutObject: async upload (save to disk, return immediately) ────
     logger.debug({ bucket, key }, 'PutObject')
 
     try {
@@ -276,9 +479,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const contentType = (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
 
       // Validate size from Content-Length header (fast path, no buffering)
-      const MIN_UPLOAD_SIZE = 127
-      const MAX_UPLOAD_SIZE = 1_065_353_216 // ~1 GiB with fr32 expansion
-
       if (contentLength !== undefined) {
         if (contentLength === 0) {
           // S3 allows empty objects, store metadata only
@@ -309,63 +509,70 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         }
       }
 
-      // Stream upload: convert Node.js Readable to Web ReadableStream
-      // This avoids buffering the entire file in memory
-      const md5 = createHash('md5')
-      let totalBytes = 0
+      // Stage to local disk — this is fast (disk I/O only)
+      const stageId = randomUUID()
+      const staged = await localStore.stageUpload(stageId, request.raw)
 
-      const uploadStream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          request.raw.on('data', (chunk: Buffer) => {
-            const uint8 = new Uint8Array(chunk)
-            md5.update(uint8)
-            totalBytes += uint8.length
-            controller.enqueue(uint8)
-          })
-          request.raw.on('end', () => {
-            controller.close()
-          })
-          request.raw.on('error', (err) => {
-            controller.error(err)
-          })
-        },
-      })
-
-      // Upload stream to FOC via Synapse SDK
-      const result = await synapseClient.upload(uploadStream)
-      const etag = md5.digest('hex')
-
-      // Verify size after streaming (in case Content-Length was missing/wrong)
-      if (totalBytes < MIN_UPLOAD_SIZE) {
+      // Validate after streaming (Content-Length may have been missing)
+      if (staged.size < MIN_UPLOAD_SIZE) {
+        localStore.delete(staged.localPath)
         sendS3Error(
           reply,
           400,
           'EntityTooSmall',
-          `Object size ${totalBytes} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`,
+          `Object size ${staged.size} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`,
           key
         )
         return
       }
 
-      // Store metadata
-      metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag, result.copies)
+      // Store metadata with status=pending, return immediately
+      metadataStore.stageObject(bucket, key, staged.size, contentType, staged.etag, staged.localPath)
 
-      reply.status(200).header('ETag', `"${etag}"`).send()
+      reply.status(200).header('ETag', `"${staged.etag}"`).send()
     } catch (error) {
       logger.error({ error, bucket, key }, 'upload failed')
-      sendInternalError(reply, 'Failed to upload object to FOC storage')
+      sendInternalError(reply, 'Failed to upload object')
     }
   })
 
-  // ── DeleteObject: DELETE /{bucket}/{key+} ───────────────────────────
+  // ── DeleteObject / AbortMultipartUpload: DELETE /{bucket}/{key+} ────
   app.delete('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
-    logger.debug({ bucket, key }, 'DeleteObject')
+    const query = request.query as Record<string, string>
 
     if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
+    }
+
+    // ── AbortMultipartUpload: DELETE /{bucket}/{key}?uploadId=X ──────
+    if ('uploadId' in query) {
+      const uploadId = query['uploadId']
+      logger.debug({ bucket, key, uploadId }, 'AbortMultipartUpload')
+
+      const upload = metadataStore.getMultipartUpload(uploadId)
+      if (!upload) {
+        sendS3Error(reply, 404, 'NoSuchUpload', 'The specified multipart upload does not exist.', key)
+        return
+      }
+
+      // Clean up parts from disk
+      localStore.cleanupMultipartDir(uploadId)
+      metadataStore.deleteMultipartUpload(uploadId)
+
+      reply.status(204).send()
+      return
+    }
+
+    // ── DeleteObject ──────────────────────────────────────────────────
+    logger.debug({ bucket, key }, 'DeleteObject')
+
+    // Clean up local file if the object is still staged
+    const localPath = metadataStore.getLocalPath(bucket, key)
+    if (localPath) {
+      localStore.delete(localPath)
     }
 
     // S3 delete is idempotent — always returns 204

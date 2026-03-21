@@ -5,9 +5,10 @@
  * Root (/) shows buckets as directories, /{bucket}/{key} maps to files.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { Logger } from 'pino'
+import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
 import type { DavResource } from './xml.js'
@@ -16,6 +17,7 @@ import { buildMultistatusXml } from './xml.js'
 export interface WebDavRouteOptions {
   metadataStore: MetadataStore
   synapseClient: SynapseClient
+  localStore: LocalStore
   logger: Logger
 }
 
@@ -44,7 +46,7 @@ function getDepth(request: FastifyRequest): number {
 }
 
 export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteOptions): void {
-  const { metadataStore, synapseClient, logger } = options
+  const { metadataStore, synapseClient, localStore, logger } = options
 
   // ── OPTIONS ──────────────────────────────────────────────────────────
   app.options('/*', async (_request, reply) => {
@@ -95,6 +97,22 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
     }
 
     try {
+      // Local-first: try local disk before going to FOC
+      const localPath = metadataStore.getLocalPath(bucket, key)
+      if (localPath && localStore.exists(localPath)) {
+        logger.debug({ bucket, key, localPath }, 'WebDAV serving from local disk')
+        const fileStream = localStore.createReadStream(localPath)
+        reply.raw.writeHead(200, {
+          'Content-Type': obj.contentType,
+          'Content-Length': obj.size,
+          ETag: `"${obj.etag}"`,
+          'Last-Modified': new Date(obj.lastModified).toUTCString(),
+        })
+        fileStream.pipe(reply.raw)
+        return
+      }
+
+      // Fall back to FOC download
       const copies = metadataStore.getObjectCopies(bucket, key)
       const { stream } = await synapseClient.download(obj.pieceCid, copies)
 
@@ -155,33 +173,21 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         }
       }
 
-      // Stream upload: convert Node.js Readable to Web ReadableStream
-      const md5 = createHash('md5')
-      let totalBytes = 0
+      // Stage to local disk — this is fast (disk I/O only)
+      const stageId = randomUUID()
+      const staged = await localStore.stageUpload(stageId, request.raw)
 
-      const uploadStream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          request.raw.on('data', (chunk: Buffer) => {
-            const uint8 = new Uint8Array(chunk)
-            md5.update(uint8)
-            totalBytes += uint8.length
-            controller.enqueue(uint8)
-          })
-          request.raw.on('end', () => {
-            controller.close()
-          })
-          request.raw.on('error', (err) => {
-            controller.error(err)
-          })
-        },
-      })
+      // Validate after streaming (Content-Length may have been missing)
+      if (staged.size < MIN_UPLOAD_SIZE) {
+        localStore.delete(staged.localPath)
+        reply.status(400).send(`File too small: ${staged.size} bytes (minimum ${MIN_UPLOAD_SIZE} bytes)`)
+        return
+      }
 
-      const result = await synapseClient.upload(uploadStream)
-      const etag = md5.digest('hex')
+      // Store metadata with status=pending, return immediately
+      metadataStore.stageObject(bucket, key, staged.size, contentType, staged.etag, staged.localPath)
 
-      metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag, result.copies)
-
-      reply.status(201).header('ETag', `"${etag}"`).send()
+      reply.status(201).header('ETag', `"${staged.etag}"`).send()
     } catch (error) {
       logger.error({ error, bucket, key }, 'WebDAV upload failed')
       reply.status(500).send('Internal Server Error')
@@ -202,6 +208,11 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
       if (!metadataStore.bucketExists(bucket)) {
         reply.status(404).send('Not Found')
         return
+      }
+      // Clean up local staged file before deleting metadata
+      const localPath = metadataStore.getLocalPath(bucket, key)
+      if (localPath) {
+        localStore.delete(localPath)
       }
       metadataStore.deleteObject(bucket, key)
       reply.status(204).send()

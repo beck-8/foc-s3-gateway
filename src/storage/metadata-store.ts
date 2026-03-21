@@ -56,6 +56,9 @@ export class MetadataStore {
         content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
         etag TEXT NOT NULL,
         copies_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'uploaded',
+        local_path TEXT,
+        upload_attempts INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         deleted INTEGER NOT NULL DEFAULT 0,
@@ -86,17 +89,59 @@ export class MetadataStore {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
+      CREATE TABLE IF NOT EXISTS multipart_uploads (
+        upload_id TEXT PRIMARY KEY,
+        bucket TEXT NOT NULL,
+        key TEXT NOT NULL,
+        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS multipart_parts (
+        upload_id TEXT NOT NULL,
+        part_number INTEGER NOT NULL,
+        local_path TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        etag TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (upload_id, part_number)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_objects_bucket ON objects(bucket);
       CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_objects_piece_cid ON objects(piece_cid);
+      CREATE INDEX IF NOT EXISTS idx_objects_status ON objects(status);
       CREATE INDEX IF NOT EXISTS idx_copies_piece ON object_copies(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_pending_piece_cid ON pending_deletions(piece_cid);
+      CREATE INDEX IF NOT EXISTS idx_multipart_bucket ON multipart_uploads(bucket, key);
     `)
+
+    // Migrate existing databases: add new columns if missing
+    this.migrateSchema()
 
     // Ensure default bucket always exists
     this.createBucket('default')
 
     this.logger.debug('database schema initialized')
+  }
+
+  /** Add columns that may be missing in databases created before async upload support */
+  private migrateSchema(): void {
+    const columns = this.db.prepare("SELECT name FROM pragma_table_info('objects')").all() as Array<{ name: string }>
+    const colNames = new Set(columns.map((c) => c.name))
+
+    if (!colNames.has('status')) {
+      this.db.exec("ALTER TABLE objects ADD COLUMN status TEXT NOT NULL DEFAULT 'uploaded'")
+      this.logger.info('migrated: added status column to objects')
+    }
+    if (!colNames.has('local_path')) {
+      this.db.exec('ALTER TABLE objects ADD COLUMN local_path TEXT')
+      this.logger.info('migrated: added local_path column to objects')
+    }
+    if (!colNames.has('upload_attempts')) {
+      this.db.exec('ALTER TABLE objects ADD COLUMN upload_attempts INTEGER NOT NULL DEFAULT 0')
+      this.logger.info('migrated: added upload_attempts column to objects')
+    }
   }
 
   // ── Bucket operations ─────────────────────────────────────────────
@@ -184,14 +229,17 @@ export class MetadataStore {
     const copiesCount = cp?.length ?? 0
 
     const putStmt = this.db.prepare(`
-      INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, updated_at, deleted)
-      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
+      INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, status, local_path, upload_attempts, updated_at, deleted)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'uploaded', NULL, 0, datetime('now'), 0)
       ON CONFLICT (bucket, key) DO UPDATE SET
         piece_cid = excluded.piece_cid,
         size = excluded.size,
         content_type = excluded.content_type,
         etag = excluded.etag,
         copies_count = excluded.copies_count,
+        status = 'uploaded',
+        local_path = NULL,
+        upload_attempts = 0,
         updated_at = datetime('now'),
         deleted = 0
     `)
@@ -442,6 +490,222 @@ export class MetadataStore {
   objectExists(bucket: string, key: string): boolean {
     const stmt = this.db.prepare('SELECT 1 FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
     return stmt.get(bucket, key) !== undefined
+  }
+
+  // ── Async upload operations ─────────────────────────────────────────
+
+  /** Stage an object for async FOC upload (returns immediately, worker uploads later) */
+  stageObject(bucket: string, key: string, size: number, contentType: string, etag: string, localPath: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, status, local_path, upload_attempts, updated_at, deleted)
+         VALUES (?, ?, '', ?, ?, ?, 0, 'pending', ?, 0, datetime('now'), 0)
+         ON CONFLICT (bucket, key) DO UPDATE SET
+           piece_cid = '',
+           size = excluded.size,
+           content_type = excluded.content_type,
+           etag = excluded.etag,
+           copies_count = 0,
+           status = 'pending',
+           local_path = excluded.local_path,
+           upload_attempts = 0,
+           updated_at = datetime('now'),
+           deleted = 0`
+      )
+      .run(bucket, key, size, contentType, etag, localPath)
+    this.logger.debug({ bucket, key, size, localPath }, 'object staged for async upload')
+  }
+
+  /** Get objects waiting to be uploaded to FOC */
+  getPendingUploads(limit = 5): Array<{
+    bucket: string
+    key: string
+    size: number
+    contentType: string
+    localPath: string
+  }> {
+    return this.db
+      .prepare(
+        `SELECT bucket, key, size, content_type as contentType, local_path as localPath
+         FROM objects
+         WHERE status IN ('pending', 'failed') AND deleted = 0
+           AND upload_attempts < 10
+         ORDER BY updated_at ASC
+         LIMIT ?`
+      )
+      .all(limit) as any
+  }
+
+  /** Mark an object as currently being uploaded */
+  markUploading(bucket: string, key: string): void {
+    this.db
+      .prepare(
+        `UPDATE objects SET status = 'uploading', upload_attempts = upload_attempts + 1, updated_at = datetime('now')
+         WHERE bucket = ? AND key = ? AND deleted = 0`
+      )
+      .run(bucket, key)
+  }
+
+  /** Complete an async upload: set pieceCid, copies, clear local_path */
+  completeUpload(bucket: string, key: string, pieceCid: string, copies?: CopyInfo[]): void {
+    const copiesCount = copies?.length ?? 0
+
+    const transaction = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE objects SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, updated_at = datetime('now')
+           WHERE bucket = ? AND key = ? AND deleted = 0`
+        )
+        .run(pieceCid, copiesCount, bucket, key)
+
+      if (copies && copies.length > 0) {
+        this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, key)
+        const insertCopy = this.db.prepare(
+          `INSERT INTO object_copies (bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        for (const copy of copies) {
+          insertCopy.run(bucket, key, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
+        }
+      }
+    })
+
+    transaction()
+    this.logger.debug({ bucket, key, pieceCid, copies: copiesCount }, 'upload completed')
+  }
+
+  /** Mark an upload as failed (will be retried by worker) */
+  markUploadFailed(bucket: string, key: string): void {
+    this.db
+      .prepare(
+        `UPDATE objects SET status = 'failed', updated_at = datetime('now')
+         WHERE bucket = ? AND key = ? AND deleted = 0`
+      )
+      .run(bucket, key)
+  }
+
+  /** Get the local path for an object (if it's still staged on disk) */
+  getLocalPath(bucket: string, key: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT local_path FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
+      .get(bucket, key) as { local_path: string | null } | undefined
+    return row?.local_path ?? undefined
+  }
+
+  /** Get all local paths that are still referenced (for orphan cleanup) */
+  getAllLocalPaths(): Set<string> {
+    const rows = this.db
+      .prepare('SELECT local_path FROM objects WHERE local_path IS NOT NULL AND deleted = 0')
+      .all() as Array<{ local_path: string }>
+    return new Set(rows.map((r) => r.local_path))
+  }
+
+  // ── Multipart upload operations ─────────────────────────────────────
+
+  /** Create a new multipart upload session */
+  createMultipartUpload(uploadId: string, bucket: string, key: string, contentType: string): void {
+    this.db
+      .prepare('INSERT INTO multipart_uploads (upload_id, bucket, key, content_type) VALUES (?, ?, ?, ?)')
+      .run(uploadId, bucket, key, contentType)
+    this.logger.debug({ uploadId, bucket, key }, 'multipart upload created')
+  }
+
+  /** Get a multipart upload session */
+  getMultipartUpload(
+    uploadId: string
+  ): { uploadId: string; bucket: string; key: string; contentType: string } | undefined {
+    return this.db
+      .prepare(
+        'SELECT upload_id as uploadId, bucket, key, content_type as contentType FROM multipart_uploads WHERE upload_id = ?'
+      )
+      .get(uploadId) as any
+  }
+
+  /** Record a completed part */
+  addMultipartPart(uploadId: string, partNumber: number, localPath: string, size: number, etag: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO multipart_parts (upload_id, part_number, local_path, size, etag)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (upload_id, part_number) DO UPDATE SET
+           local_path = excluded.local_path,
+           size = excluded.size,
+           etag = excluded.etag`
+      )
+      .run(uploadId, partNumber, localPath, size, etag)
+  }
+
+  /** Get all parts for a multipart upload, sorted by part number */
+  getMultipartParts(uploadId: string): Array<{ partNumber: number; localPath: string; size: number; etag: string }> {
+    return this.db
+      .prepare(
+        `SELECT part_number as partNumber, local_path as localPath, size, etag
+         FROM multipart_parts WHERE upload_id = ? ORDER BY part_number ASC`
+      )
+      .all(uploadId) as any
+  }
+
+  /** Delete a multipart upload session and its parts records */
+  deleteMultipartUpload(uploadId: string): void {
+    const transaction = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM multipart_parts WHERE upload_id = ?').run(uploadId)
+      this.db.prepare('DELETE FROM multipart_uploads WHERE upload_id = ?').run(uploadId)
+    })
+    transaction()
+    this.logger.debug({ uploadId }, 'multipart upload deleted')
+  }
+
+  /** List active multipart uploads for a bucket */
+  listMultipartUploads(
+    bucket: string
+  ): Array<{ uploadId: string; key: string; contentType: string; createdAt: string }> {
+    return this.db
+      .prepare(
+        `SELECT upload_id as uploadId, key, content_type as contentType, created_at as createdAt
+         FROM multipart_uploads WHERE bucket = ? ORDER BY created_at ASC`
+      )
+      .all(bucket) as any
+  }
+
+  /** Count all active multipart uploads across all buckets */
+  countAllMultipartUploads(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as count FROM multipart_uploads').get() as { count: number }
+    return row.count
+  }
+
+  // ── Status / stats ──────────────────────────────────────────────────
+
+  /** Get aggregate upload status counts */
+  getUploadStats(): { pending: number; uploading: number; uploaded: number; failed: number } {
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) as count
+         FROM objects WHERE deleted = 0
+         GROUP BY status`
+      )
+      .all() as Array<{ status: string; count: number }>
+
+    const stats = { pending: 0, uploading: 0, uploaded: 0, failed: 0 }
+    for (const row of rows) {
+      if (row.status in stats) {
+        stats[row.status as keyof typeof stats] = row.count
+      }
+    }
+    return stats
+  }
+
+  /** Get objects by status (for detailed status page) */
+  getObjectsByStatus(
+    status: string,
+    limit = 50
+  ): Array<{ bucket: string; key: string; size: number; uploadAttempts: number; updatedAt: string }> {
+    return this.db
+      .prepare(
+        `SELECT bucket, key, size, upload_attempts as uploadAttempts, updated_at as updatedAt
+         FROM objects WHERE status = ? AND deleted = 0
+         ORDER BY updated_at DESC LIMIT ?`
+      )
+      .all(status, limit) as any
   }
 
   close(): void {

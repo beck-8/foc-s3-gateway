@@ -121,3 +121,21 @@ ${deletedEntries}
 ${errorEntries}
 </DeleteResult>`
 }
+
+export function buildInitiateMultipartUploadXml(bucket: string, key: string, uploadId: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>${escapeXml(bucket)}</Bucket>
+  <Key>${escapeXml(key)}</Key>
+  <UploadId>${escapeXml(uploadId)}</UploadId>
+</InitiateMultipartUploadResult>`
+}
+
+export function buildCompleteMultipartUploadXml(bucket: string, key: string, etag: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>${escapeXml(bucket)}</Bucket>
+  <Key>${escapeXml(key)}</Key>
+  <ETag>"${escapeXml(etag)}"</ETag>
+</CompleteMultipartUploadResult>`
+}
