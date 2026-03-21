@@ -17,7 +17,17 @@ const logger = pino({ level: 'silent' })
 function createMockSynapseClient() {
   return {
     getAddress: vi.fn().mockReturnValue('0xMOCK_ADDRESS'),
-    upload: vi.fn().mockResolvedValue({ pieceCid: 'baga-test-cid', size: 1024 }),
+    upload: vi.fn().mockImplementation(async (data: Uint8Array | ReadableStream<Uint8Array>) => {
+      // Consume the stream so MD5 computation completes
+      if (data instanceof ReadableStream) {
+        const reader = data.getReader()
+        while (true) {
+          const { done } = await reader.read()
+          if (done) break
+        }
+      }
+      return { pieceCid: 'baga-test-cid', size: 1024, copies: [] }
+    }),
     download: vi.fn().mockResolvedValue(new Uint8Array([72, 101, 108, 108, 111])), // "Hello"
   }
 }

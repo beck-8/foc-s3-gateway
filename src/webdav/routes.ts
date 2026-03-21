@@ -134,34 +134,56 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
     }
 
     try {
-      const chunks: Buffer[] = []
-      for await (const chunk of request.raw) {
-        chunks.push(Buffer.from(chunk))
-      }
-      const body = Buffer.concat(chunks)
-      const etag = createHash('md5').update(body).digest('hex')
+      const contentLength = request.headers['content-length']
+        ? Number.parseInt(request.headers['content-length'] as string, 10)
+        : undefined
       const contentType = (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
 
-      if (body.length === 0) {
-        metadataStore.putObject(bucket, key, '', 0, contentType, etag)
-        reply.status(201).header('ETag', `"${etag}"`).send()
-        return
-      }
-
-      // Validate file size limits (Filecoin SP constraints)
+      // Validate size from Content-Length header (fast path)
       const MIN_UPLOAD_SIZE = 127
-      const MAX_UPLOAD_SIZE = 1_065_353_216 // ~1 GiB with fr32 expansion
-      if (body.length < MIN_UPLOAD_SIZE) {
-        reply.status(400).send(`File too small: ${body.length} bytes (minimum ${MIN_UPLOAD_SIZE} bytes)`)
-        return
-      }
-      if (body.length > MAX_UPLOAD_SIZE) {
-        reply.status(413).send(`File too large: ${body.length} bytes (maximum ~1 GiB)`)
-        return
+      const MAX_UPLOAD_SIZE = 1_065_353_216
+
+      if (contentLength !== undefined) {
+        if (contentLength === 0) {
+          const etag = createHash('md5').update('').digest('hex')
+          metadataStore.putObject(bucket, key, '', 0, contentType, etag)
+          reply.status(201).header('ETag', `"${etag}"`).send()
+          return
+        }
+        if (contentLength < MIN_UPLOAD_SIZE) {
+          reply.status(400).send(`File too small: ${contentLength} bytes (minimum ${MIN_UPLOAD_SIZE} bytes)`)
+          return
+        }
+        if (contentLength > MAX_UPLOAD_SIZE) {
+          reply.status(413).send(`File too large: ${contentLength} bytes (maximum ~1 GiB)`)
+          return
+        }
       }
 
-      const data = new Uint8Array(body)
-      const result = await synapseClient.upload(data)
+      // Stream upload: convert Node.js Readable to Web ReadableStream
+      const md5 = createHash('md5')
+      let totalBytes = 0
+
+      const uploadStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          request.raw.on('data', (chunk: Buffer) => {
+            const uint8 = new Uint8Array(chunk)
+            md5.update(uint8)
+            totalBytes += uint8.length
+            controller.enqueue(uint8)
+          })
+          request.raw.on('end', () => {
+            controller.close()
+          })
+          request.raw.on('error', (err) => {
+            controller.error(err)
+          })
+        },
+      })
+
+      const result = await synapseClient.upload(uploadStream)
+      const etag = md5.digest('hex')
+
       metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag, result.copies)
 
       reply.status(201).header('ETag', `"${etag}"`).send()

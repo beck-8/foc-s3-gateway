@@ -230,50 +230,70 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     logger.debug({ bucket, key }, 'PutObject')
 
     try {
-      // Collect request body as buffer
-      const chunks: Buffer[] = []
-      for await (const chunk of request.raw) {
-        chunks.push(Buffer.from(chunk))
-      }
-      const body = Buffer.concat(chunks)
-
-      if (body.length === 0) {
-        // S3 allows empty objects, store metadata only
-        const etag = createHash('md5').update(body).digest('hex')
-        const contentType =
-          (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
-        metadataStore.putObject(bucket, key, '', 0, contentType, etag)
-
-        reply
-          .status(200)
-          .header('ETag', `"${etag}"`)
-          .send()
-        return
-      }
-
-      // Validate file size limits (Filecoin SP constraints)
-      const MIN_UPLOAD_SIZE = 127
-      const MAX_UPLOAD_SIZE = 1_065_353_216 // ~1 GiB with fr32 expansion
-      if (body.length < MIN_UPLOAD_SIZE) {
-        sendS3Error(reply, 400, 'EntityTooSmall',
-          `Object size ${body.length} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`, key)
-        return
-      }
-      if (body.length > MAX_UPLOAD_SIZE) {
-        sendS3Error(reply, 400, 'EntityTooLarge',
-          `Object size ${body.length} bytes exceeds maximum ${MAX_UPLOAD_SIZE} bytes (~1 GiB).`, key)
-        return
-      }
-
-      // Upload to FOC via Synapse SDK
-      const data = new Uint8Array(body)
-      const result = await synapseClient.upload(data)
-
-      // Store metadata
-      const etag = createHash('md5').update(body).digest('hex')
+      const contentLength = request.headers['content-length']
+        ? Number.parseInt(request.headers['content-length'] as string, 10)
+        : undefined
       const contentType =
         (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
 
+      // Validate size from Content-Length header (fast path, no buffering)
+      const MIN_UPLOAD_SIZE = 127
+      const MAX_UPLOAD_SIZE = 1_065_353_216 // ~1 GiB with fr32 expansion
+
+      if (contentLength !== undefined) {
+        if (contentLength === 0) {
+          // S3 allows empty objects, store metadata only
+          const etag = createHash('md5').update('').digest('hex')
+          metadataStore.putObject(bucket, key, '', 0, contentType, etag)
+          reply.status(200).header('ETag', `"${etag}"`).send()
+          return
+        }
+        if (contentLength < MIN_UPLOAD_SIZE) {
+          sendS3Error(reply, 400, 'EntityTooSmall',
+            `Object size ${contentLength} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`, key)
+          return
+        }
+        if (contentLength > MAX_UPLOAD_SIZE) {
+          sendS3Error(reply, 400, 'EntityTooLarge',
+            `Object size ${contentLength} bytes exceeds maximum ${MAX_UPLOAD_SIZE} bytes (~1 GiB).`, key)
+          return
+        }
+      }
+
+      // Stream upload: convert Node.js Readable to Web ReadableStream
+      // This avoids buffering the entire file in memory
+      const md5 = createHash('md5')
+      let totalBytes = 0
+
+      const uploadStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          request.raw.on('data', (chunk: Buffer) => {
+            const uint8 = new Uint8Array(chunk)
+            md5.update(uint8)
+            totalBytes += uint8.length
+            controller.enqueue(uint8)
+          })
+          request.raw.on('end', () => {
+            controller.close()
+          })
+          request.raw.on('error', (err) => {
+            controller.error(err)
+          })
+        },
+      })
+
+      // Upload stream to FOC via Synapse SDK
+      const result = await synapseClient.upload(uploadStream)
+      const etag = md5.digest('hex')
+
+      // Verify size after streaming (in case Content-Length was missing/wrong)
+      if (totalBytes < MIN_UPLOAD_SIZE) {
+        sendS3Error(reply, 400, 'EntityTooSmall',
+          `Object size ${totalBytes} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`, key)
+        return
+      }
+
+      // Store metadata
       metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag, result.copies)
 
       reply

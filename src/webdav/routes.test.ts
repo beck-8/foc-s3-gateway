@@ -15,10 +15,15 @@ describe('WebDAV Routes', () => {
   let metadataStore: MetadataStore
 
   const mockSynapse = {
-    upload: vi.fn().mockResolvedValue({
-      pieceCid: 'baga-test',
-      size: 100,
-      copies: [],
+    upload: vi.fn().mockImplementation(async (data: Uint8Array | ReadableStream<Uint8Array>) => {
+      if (data instanceof ReadableStream) {
+        const reader = data.getReader()
+        while (true) {
+          const { done } = await reader.read()
+          if (done) break
+        }
+      }
+      return { pieceCid: 'baga-test', size: 100, copies: [] }
     }),
     download: vi.fn().mockResolvedValue(new Uint8Array([72, 101, 108, 108, 111])),
     getAddress: vi.fn().mockReturnValue('0xtest'),

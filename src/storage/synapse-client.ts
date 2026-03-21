@@ -69,10 +69,11 @@ export class SynapseClient {
     return this.synapse
   }
 
-  async upload(data: Uint8Array): Promise<UploadResult> {
+  async upload(data: Uint8Array | ReadableStream<Uint8Array>): Promise<UploadResult> {
     const synapse = this.getSynapse()
 
-    this.logger.info({ dataSize: data.length }, 'uploading to FOC')
+    const dataSize = data instanceof Uint8Array ? data.length : undefined
+    this.logger.info({ dataSize: dataSize ?? 'streaming' }, 'uploading to FOC')
 
     const result = await synapse.storage.upload(data)
 
