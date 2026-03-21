@@ -33,6 +33,10 @@ export async function createServer(options: ServerOptions) {
         target: 'pino-pretty',
         options: { colorize: true },
       },
+      serializers: {
+        // Display responseTime in seconds instead of milliseconds
+        responseTime: (ms: number) => `${(ms / 1000).toFixed(2)}s`,
+      },
     },
     // Disable body parsing — we handle raw streams for PutObject
     bodyLimit: 1024 * 1024 * 1024, // 1 GiB
