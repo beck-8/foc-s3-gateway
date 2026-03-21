@@ -258,4 +258,4 @@ npm test             # lint + typecheck + test
 
 ## License
 
-Apache-2.0 OR MIT
+MIT

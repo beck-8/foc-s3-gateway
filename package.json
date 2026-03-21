@@ -27,7 +27,7 @@
     "storage",
     "gateway"
   ],
-  "license": "Apache-2.0 OR MIT",
+  "license": "MIT",
   "dependencies": {
     "@filoz/synapse-sdk": "^0.40.0",
     "better-sqlite3": "^11.8.1",
