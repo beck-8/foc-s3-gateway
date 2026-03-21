@@ -63,9 +63,15 @@ export async function createServer(options: ServerOptions) {
   })
   const localStore = new LocalStore({ dataDir, logger })
 
-  // Disable Fastify's default content type parser for all types
-  // so we can handle raw request bodies ourselves
+  // Parse XML bodies as strings (needed for DeleteObjects, etc.)
+  // All other content types pass through as raw streams (for PutObject uploads)
   app.removeAllContentTypeParsers()
+  app.addContentTypeParser('application/xml', { parseAs: 'string' }, (_request, body, done) => {
+    done(null, body)
+  })
+  app.addContentTypeParser('text/xml', { parseAs: 'string' }, (_request, body, done) => {
+    done(null, body)
+  })
   app.addContentTypeParser('*', (_request, _payload, done) => {
     done(null)
   })
