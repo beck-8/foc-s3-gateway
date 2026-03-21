@@ -8,6 +8,7 @@ import path from 'node:path'
 import Fastify from 'fastify'
 import type { Logger } from 'pino'
 import { registerRoutes } from './routes/index.js'
+import { createAuthHook } from './auth/index.js'
 import { MetadataStore } from './storage/metadata-store.js'
 import { SynapseClient } from './storage/synapse-client.js'
 
@@ -18,6 +19,8 @@ export interface ServerOptions {
   rpcUrl?: string | undefined
   network?: string | undefined
   dbPath?: string | undefined
+  accessKey?: string | undefined
+  secretKey?: string | undefined
 }
 
 export async function createServer(options: ServerOptions) {
@@ -55,6 +58,19 @@ export async function createServer(options: ServerOptions) {
   app.addContentTypeParser('*', function (_request, _payload, done) {
     done(null)
   })
+
+  // Register auth if credentials provided
+  if (options.accessKey && options.secretKey) {
+    const authHook = createAuthHook({
+      accessKey: options.accessKey,
+      secretKey: options.secretKey,
+      logger,
+    })
+    app.addHook('preHandler', authHook)
+    logger.info('authentication enabled')
+  } else {
+    logger.warn('no access key / secret key configured — running WITHOUT authentication')
+  }
 
   // Register routes
   registerRoutes(app, { metadataStore, synapseClient, logger })

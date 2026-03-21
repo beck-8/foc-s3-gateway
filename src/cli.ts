@@ -23,6 +23,8 @@ program
   .option('-r, --rpc-url <url>', 'RPC URL (or set RPC_URL env)')
   .option('-d, --db-path <path>', 'SQLite database path')
   .option('-n, --network <network>', 'Network: mainnet or calibration', 'calibration')
+  .option('-a, --access-key <key>', 'Access key for authentication (or set ACCESS_KEY env)')
+  .option('-s, --secret-key <key>', 'Secret key for authentication (or set SECRET_KEY env)')
   .action(async (options) => {
     const privateKey = options.privateKey ?? process.env['PRIVATE_KEY']
     if (!privateKey) {
@@ -38,6 +40,8 @@ program
       privateKey,
       rpcUrl,
       dbPath: options.dbPath ?? process.env['DB_PATH'],
+      accessKey: options.accessKey ?? process.env['ACCESS_KEY'],
+      secretKey: options.secretKey ?? process.env['SECRET_KEY'],
     })
   })
 
