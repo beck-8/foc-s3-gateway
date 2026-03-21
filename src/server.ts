@@ -89,7 +89,7 @@ export async function startServer(options: ServerOptions): Promise<void> {
   const { app, metadataStore, synapseClient } = await createServer(options)
 
   try {
-    await app.listen({ port: options.port, host: options.host, listenTextResolver: () => '' })
+    await app.listen({ port: options.port, host: options.host })
 
     const address = app.server.address()
     const addressStr = typeof address === 'string' ? address : `${address?.address}:${address?.port}`

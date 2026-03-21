@@ -72,5 +72,5 @@ export async function createWebDavServer(options: WebDavServerOptions) {
 export async function startWebDavServer(options: WebDavServerOptions): Promise<void> {
   const app = await createWebDavServer(options)
 
-  await app.listen({ port: options.port, host: options.host, listenTextResolver: () => '' })
+  await app.listen({ port: options.port, host: options.host })
 }
