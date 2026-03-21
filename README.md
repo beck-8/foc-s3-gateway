@@ -85,19 +85,32 @@ pass = mySecretKey
 
 #### Windows
 
-```cmd
-net use Z: http://localhost:8334 /user:myAccessKey mySecretKey
-```
+1. Open **This PC** → Right-click → **Add a network location**
+2. Enter `http://localhost:8334` as the address
+3. When prompted, enter your Access Key as username and Secret Key as password
+
+> **Note:** Windows WebClient defaults to HTTPS only. For HTTP, set registry key
+> `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel` to `2`,
+> then restart the WebClient service. Alternatively, use **WinSCP** or **Rclone WebDAV** (see above).
 
 #### macOS
 
-Finder → Go → Connect to Server → `http://localhost:8334`
+Finder → Go → Connect to Server → `http://localhost:8334` (username = Access Key, password = Secret Key)
 
 ## Authentication
 
-Authentication is **optional**. If `--access-key` and `--secret-key` are provided:
-- **S3**: Validates Access Key from AWS Signature V4 `Authorization` header (signature not verified)
-- **WebDAV**: Validates via HTTP Basic Auth (username = access key, password = secret key)
+Authentication is **optional**. If `--access-key` and `--secret-key` are provided, both S3 and WebDAV endpoints require valid credentials.
+
+**The same AK/SK pair is transmitted differently in each protocol:**
+
+| | S3 | WebDAV |
+|--|------|--------|
+| **Protocol** | AWS Signature V4 | HTTP Basic Auth |
+| **AK sent as** | `Authorization: AWS4-HMAC-SHA256 Credential=<AK>/...` | `Authorization: Basic base64(<AK>:<SK>)` |
+| **SK usage** | Client uses SK to compute signature (gateway only validates AK match) | Sent directly for comparison |
+| **Client config** | `access_key_id` + `secret_access_key` | username + password |
+
+> **Note:** This gateway does NOT verify the AWS Signature V4 signature itself — it only checks that the Access Key matches. This means SK is not actually validated on the S3 side, but S3 clients (rclone, aws-cli, etc.) still require a SK to generate valid requests.
 
 Without credentials, the server runs in open mode (no auth).
 

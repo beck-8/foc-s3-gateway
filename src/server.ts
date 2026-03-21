@@ -123,10 +123,9 @@ export async function startServer(options: ServerOptions): Promise<void> {
 ║    access_key_id = <your-access-key>                         ║
 ║    secret_access_key = <your-secret-key>                     ║
 ║                                                              ║
-║  WebDAV usage:                                               ║
-║    Windows: net use Z: http://${webdavAddr.padEnd(25)}       ║
+║  WebDAV usage (rclone/WinSCP recommended):                   ║
+║    rclone:  type=webdav, url=http://${webdavAddr.padEnd(22)}        ║
 ║    macOS:   Finder → Connect → http://${webdavAddr.padEnd(18)}       ║
-║    rclone:  rclone config (type=webdav, url=http://${webdavAddr})    ║
 ╚══════════════════════════════════════════════════════════════╝
 `)
   } catch (error) {
