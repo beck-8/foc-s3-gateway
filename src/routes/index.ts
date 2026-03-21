@@ -409,6 +409,24 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const key = (request.params as { '*': string })['*']
     const query = request.query as Record<string, string>
 
+    // Trailing slash: PUT /bucket/ → treat as CreateBucket
+    if (!key) {
+      logger.debug({ bucket }, 'CreateBucket (trailing slash)')
+      if (metadataStore.bucketExists(bucket)) {
+        sendS3Error(
+          reply,
+          409,
+          'BucketAlreadyOwnedByYou',
+          'Your previous request to create the named bucket succeeded and you already own it.',
+          bucket
+        )
+        return
+      }
+      metadataStore.createBucket(bucket)
+      reply.status(200).header('Location', `/${bucket}`).send()
+      return
+    }
+
     if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
