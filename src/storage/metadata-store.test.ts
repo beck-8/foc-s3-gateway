@@ -103,6 +103,68 @@ describe('MetadataStore', () => {
     })
   })
 
+  // ── Object copies ───────────────────────────────────────────────────
+
+  describe('putObject with copies / getObjectCopies', () => {
+    const testCopies = [
+      { providerId: '42', dataSetId: '100', retrievalUrl: 'https://sp1.example.com/piece/baga1', role: 'primary' as const },
+      { providerId: '99', dataSetId: '200', retrievalUrl: 'https://sp2.example.com/piece/baga1', role: 'secondary' as const },
+    ]
+
+    it('stores and retrieves copies', () => {
+      store.putObject('default', 'doc.pdf', 'baga1', 1024, 'application/pdf', 'etag1', testCopies)
+
+      const copies = store.getObjectCopies('default', 'doc.pdf')
+
+      expect(copies).toHaveLength(2)
+      const primary = copies.find((c) => c.role === 'primary')
+      const secondary = copies.find((c) => c.role === 'secondary')
+      expect(primary?.providerId).toBe('42')
+      expect(primary?.retrievalUrl).toBe('https://sp1.example.com/piece/baga1')
+      expect(secondary?.providerId).toBe('99')
+    })
+
+    it('returns empty array for object without copies', () => {
+      store.putObject('default', 'no-copies.txt', 'cid', 10, 'text/plain', 'etag')
+
+      const copies = store.getObjectCopies('default', 'no-copies.txt')
+
+      expect(copies).toHaveLength(0)
+    })
+
+    it('replaces copies on re-upload', () => {
+      store.putObject('default', 'evolving.txt', 'cid-v1', 100, 'text/plain', 'e1', testCopies)
+
+      const newCopies = [
+        { providerId: '77', dataSetId: '300', retrievalUrl: 'https://sp3.example.com/piece/cid-v2', role: 'primary' as const },
+      ]
+      store.putObject('default', 'evolving.txt', 'cid-v2', 200, 'text/plain', 'e2', newCopies)
+
+      const copies = store.getObjectCopies('default', 'evolving.txt')
+
+      expect(copies).toHaveLength(1)
+      expect(copies[0]?.providerId).toBe('77')
+    })
+
+    it('works with object params style', () => {
+      store.putObject({
+        bucket: 'default',
+        key: 'objstyle.txt',
+        pieceCid: 'baga-obj',
+        size: 512,
+        contentType: 'text/plain',
+        etag: 'etag-obj',
+        copies: testCopies,
+      })
+
+      const obj = store.getObject('default', 'objstyle.txt')
+      expect(obj?.pieceCid).toBe('baga-obj')
+
+      const copies = store.getObjectCopies('default', 'objstyle.txt')
+      expect(copies).toHaveLength(2)
+    })
+  })
+
   // ── Basic CRUD ──────────────────────────────────────────────────────
 
   describe('putObject / getObject', () => {

@@ -8,10 +8,21 @@
 import Database from 'better-sqlite3'
 import type { Logger } from 'pino'
 import type { S3Bucket, S3Object } from '../s3/types.js'
+import type { CopyInfo } from './synapse-client.js'
 
 export interface MetadataStoreOptions {
   dbPath: string
   logger: Logger
+}
+
+export interface PutObjectOptions {
+  bucket: string
+  key: string
+  pieceCid: string
+  size: number
+  contentType: string
+  etag: string
+  copies?: CopyInfo[] | undefined
 }
 
 export class MetadataStore {
@@ -39,15 +50,28 @@ export class MetadataStore {
         size INTEGER NOT NULL,
         content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
         etag TEXT NOT NULL,
+        copies_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         deleted INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (bucket, key)
       );
 
+      CREATE TABLE IF NOT EXISTS object_copies (
+        bucket TEXT NOT NULL,
+        key TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        data_set_id TEXT NOT NULL,
+        retrieval_url TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'primary',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (bucket, key, provider_id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_objects_bucket ON objects(bucket);
       CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_objects_piece_cid ON objects(piece_cid);
+      CREATE INDEX IF NOT EXISTS idx_copies_piece ON object_copies(bucket, key);
     `)
 
     // Ensure default bucket always exists
@@ -94,20 +118,78 @@ export class MetadataStore {
 
   // ── Object operations ──────────────────────────────────────────────
 
-  putObject(bucket: string, key: string, pieceCid: string, size: number, contentType: string, etag: string): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, updated_at, deleted)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0)
+  putObject(options: PutObjectOptions): void
+  putObject(bucket: string, key: string, pieceCid: string, size: number, contentType: string, etag: string, copies?: CopyInfo[]): void
+  putObject(
+    bucketOrOptions: string | PutObjectOptions,
+    key?: string,
+    pieceCid?: string,
+    size?: number,
+    contentType?: string,
+    etag?: string,
+    copies?: CopyInfo[]
+  ): void {
+    // Normalize arguments
+    let bucket: string
+    let k: string
+    let pc: string
+    let sz: number
+    let ct: string
+    let et: string
+    let cp: CopyInfo[] | undefined
+
+    if (typeof bucketOrOptions === 'object') {
+      bucket = bucketOrOptions.bucket
+      k = bucketOrOptions.key
+      pc = bucketOrOptions.pieceCid
+      sz = bucketOrOptions.size
+      ct = bucketOrOptions.contentType
+      et = bucketOrOptions.etag
+      cp = bucketOrOptions.copies
+    } else {
+      bucket = bucketOrOptions
+      k = key!
+      pc = pieceCid!
+      sz = size!
+      ct = contentType!
+      et = etag!
+      cp = copies
+    }
+
+    const copiesCount = cp?.length ?? 0
+
+    const putStmt = this.db.prepare(`
+      INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, updated_at, deleted)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
       ON CONFLICT (bucket, key) DO UPDATE SET
         piece_cid = excluded.piece_cid,
         size = excluded.size,
         content_type = excluded.content_type,
         etag = excluded.etag,
+        copies_count = excluded.copies_count,
         updated_at = datetime('now'),
         deleted = 0
     `)
-    stmt.run(bucket, key, pieceCid, size, contentType, etag)
-    this.logger.debug({ bucket, key, pieceCid }, 'object stored')
+
+    const transaction = this.db.transaction(() => {
+      putStmt.run(bucket, k, pc, sz, ct, et, copiesCount)
+
+      // Replace copy records if provided
+      if (cp && cp.length > 0) {
+        this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, k)
+
+        const insertCopy = this.db.prepare(`
+          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, retrieval_url, role)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `)
+        for (const copy of cp) {
+          insertCopy.run(bucket, k, copy.providerId, copy.dataSetId, copy.retrievalUrl, copy.role)
+        }
+      }
+    })
+
+    transaction()
+    this.logger.debug({ bucket, key: k, pieceCid: pc, copies: copiesCount }, 'object stored')
   }
 
   getObject(bucket: string, key: string): S3Object | undefined {
@@ -118,6 +200,17 @@ export class MetadataStore {
     `)
     const row = stmt.get(bucket, key) as S3Object | undefined
     return row
+  }
+
+  /** Get copy records for an object — used for choosing download source */
+  getObjectCopies(bucket: string, key: string): CopyInfo[] {
+    const rows = this.db.prepare(`
+      SELECT provider_id as providerId, data_set_id as dataSetId, retrieval_url as retrievalUrl, role
+      FROM object_copies
+      WHERE bucket = ? AND key = ?
+      ORDER BY role ASC
+    `).all(bucket, key)
+    return rows as CopyInfo[]
   }
 
   listObjects(

@@ -18,6 +18,21 @@ export interface SynapseClientOptions {
   logger: Logger
 }
 
+/** Copy info from a single provider */
+export interface CopyInfo {
+  providerId: string
+  dataSetId: string
+  retrievalUrl: string
+  role: 'primary' | 'secondary'
+}
+
+/** Full upload result with provider details */
+export interface UploadResult {
+  pieceCid: string
+  size: number
+  copies: CopyInfo[]
+}
+
 export class SynapseClient {
   private synapse: Synapse | undefined
   private readonly privateKey: string
@@ -39,9 +54,6 @@ export class SynapseClient {
     const chain = this.network === 'mainnet' ? filecoin : filecoinCalibration
     const transport = this.rpcUrl ? http(this.rpcUrl) : http()
 
-    // Use the Synapse constructor directly with a viem client
-    // Synapse.create() requires chains from @filoz/synapse-core which adds custom props,
-    // but the constructor with a viem client works with standard viem chains
     const client = createWalletClient({
       account,
       chain,
@@ -57,19 +69,27 @@ export class SynapseClient {
     return this.synapse
   }
 
-  async upload(data: Uint8Array): Promise<{ pieceCid: string; size: number }> {
+  async upload(data: Uint8Array): Promise<UploadResult> {
     const synapse = this.getSynapse()
 
     this.logger.info({ dataSize: data.length }, 'uploading to FOC')
 
     const result = await synapse.storage.upload(data)
 
+    const copies: CopyInfo[] = result.copies.map((copy) => ({
+      providerId: copy.providerId.toString(),
+      dataSetId: copy.dataSetId.toString(),
+      retrievalUrl: copy.retrievalUrl,
+      role: copy.role,
+    }))
+
     this.logger.info(
       {
         pieceCid: result.pieceCid.toString(),
         size: result.size,
-        copies: result.copies.length,
+        copies: copies.length,
         complete: result.complete,
+        providers: copies.map((c) => c.providerId),
       },
       'upload complete'
     )
@@ -77,18 +97,59 @@ export class SynapseClient {
     return {
       pieceCid: result.pieceCid.toString(),
       size: result.size,
+      copies,
     }
   }
 
-  async download(pieceCid: string): Promise<Uint8Array> {
+  /**
+   * Download with fallback strategy:
+   *   1. Try each stored retrieval URL directly (primary first, then secondaries)
+   *   2. Fall back to Synapse SDK discovery (tries all known providers)
+   *
+   * Direct URL fetch is faster because it skips provider discovery and chain lookups.
+   */
+  async download(pieceCid: string, copies?: CopyInfo[]): Promise<Uint8Array> {
+    // Sort: primary first, then secondary
+    const sorted = copies
+      ? [...copies].sort((a, b) => (a.role === 'primary' ? -1 : 1) - (b.role === 'primary' ? -1 : 1))
+      : []
+
+    // Try stored retrieval URLs first (fast path — no chain lookups)
+    for (const copy of sorted) {
+      try {
+        this.logger.debug(
+          { pieceCid, providerId: copy.providerId, role: copy.role },
+          'trying direct download'
+        )
+
+        const response = await fetch(copy.retrievalUrl)
+        if (response.ok) {
+          const data = new Uint8Array(await response.arrayBuffer())
+          this.logger.info(
+            { pieceCid, providerId: copy.providerId, role: copy.role, size: data.length },
+            'direct download succeeded'
+          )
+          return data
+        }
+
+        this.logger.warn(
+          { pieceCid, providerId: copy.providerId, status: response.status },
+          'direct download failed, trying next'
+        )
+      } catch (error) {
+        this.logger.warn(
+          { pieceCid, providerId: copy.providerId, error },
+          'direct download error, trying next'
+        )
+      }
+    }
+
+    // Fallback: Synapse SDK discovery (slower but more resilient)
+    this.logger.info({ pieceCid }, 'falling back to SDK download')
     const synapse = this.getSynapse()
-
-    this.logger.info({ pieceCid }, 'downloading from FOC')
-
     const data = await synapse.storage.download({ pieceCid })
 
-    this.logger.info({ pieceCid, size: data.length }, 'download complete')
-
+    this.logger.info({ pieceCid, size: data.length }, 'SDK download complete')
     return data
   }
 

@@ -168,7 +168,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
 
     try {
-      const data = await synapseClient.download(obj.pieceCid)
+      // Get stored copy URLs for direct download (primary → secondary → SDK fallback)
+      const copies = metadataStore.getObjectCopies(bucket, key)
+      const data = await synapseClient.download(obj.pieceCid, copies)
 
       reply
         .status(200)
@@ -225,7 +227,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const contentType =
         (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
 
-      metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag)
+      metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag, result.copies)
 
       reply
         .status(200)

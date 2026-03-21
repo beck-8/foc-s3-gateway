@@ -265,7 +265,7 @@ describe('S3 Routes', () => {
       expect(response.statusCode).toBe(200)
       expect(response.headers['content-type']).toBe('text/plain')
       expect(response.headers['etag']).toBe('"etag1"')
-      expect(mockSynapse.download).toHaveBeenCalledWith('baga-cid')
+      expect(mockSynapse.download).toHaveBeenCalledWith('baga-cid', [])
       expect(response.body).toBe('Hello')
     })
 
