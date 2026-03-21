@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import type { FastifyInstance } from 'fastify'
 import type { Logger } from 'pino'
 import { sendInternalError, sendNoSuchBucket, sendNoSuchKey } from '../s3/errors.js'
 import { buildListBucketsXml, buildListObjectsV2Xml } from '../s3/xml.js'
@@ -20,16 +20,6 @@ export interface RouteContext {
   logger: Logger
 }
 
-/** Parse bucket and key from S3-style path: /{bucket}/{key...} */
-function parsePath(url: string): { bucket: string; key: string } {
-  // Remove query string
-  const pathOnly = url.split('?')[0] ?? url
-  const parts = pathOnly.split('/').filter(Boolean)
-  const bucket = parts[0] ?? ''
-  const key = parts.slice(1).join('/')
-  return { bucket, key }
-}
-
 /** Check if the bucket is valid (we only support the default bucket for now) */
 function isValidBucket(bucket: string): boolean {
   return bucket === DEFAULT_BUCKET
@@ -42,7 +32,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.get('/', async (_request, reply) => {
     logger.debug('ListBuckets')
 
-    const ownerId = await synapseClient.getAddress()
+    const ownerId = synapseClient.getAddress()
 
     const xml = buildListBucketsXml(
       [
@@ -96,7 +86,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     const lastKey = objects[objects.length - 1]?.key
 
-    const xml = buildListObjectsV2Xml({
+    const nextToken = isTruncated && lastKey ? lastKey : undefined
+
+    const response = {
       name: bucket,
       prefix,
       maxKeys,
@@ -104,14 +96,17 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       contents: objects,
       commonPrefixes,
       keyCount: objects.length,
-      nextContinuationToken: isTruncated ? lastKey : undefined,
-    })
+    }
+
+    const xml = buildListObjectsV2Xml(
+      nextToken ? { ...response, nextContinuationToken: nextToken } : response
+    )
 
     reply.header('Content-Type', 'application/xml').send(xml)
   })
 
   // ── HeadObject: HEAD /{bucket}/{key+} ───────────────────────────────
-  app.head('/:bucket/*', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.head('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'HeadObject')
@@ -137,7 +132,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   })
 
   // ── GetObject: GET /{bucket}/{key+} ─────────────────────────────────
-  app.get('/:bucket/*', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.get('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'GetObject')
@@ -170,7 +165,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   })
 
   // ── PutObject: PUT /{bucket}/{key+} ─────────────────────────────────
-  app.put('/:bucket/*', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.put('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'PutObject')
@@ -224,7 +219,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   })
 
   // ── DeleteObject: DELETE /{bucket}/{key+} ───────────────────────────
-  app.delete('/:bucket/*', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.delete('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
     logger.debug({ bucket, key }, 'DeleteObject')

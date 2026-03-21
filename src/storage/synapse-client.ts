@@ -7,10 +7,14 @@
 
 import { Synapse } from '@filoz/synapse-sdk'
 import type { Logger } from 'pino'
+import { type Hex, createWalletClient, http } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
+import { filecoin, filecoinCalibration } from 'viem/chains'
 
 export interface SynapseClientOptions {
   privateKey: string
-  rpcUrl?: string
+  rpcUrl?: string | undefined
+  network?: string | undefined
   logger: Logger
 }
 
@@ -18,34 +22,43 @@ export class SynapseClient {
   private synapse: Synapse | undefined
   private readonly privateKey: string
   private readonly rpcUrl: string | undefined
+  private readonly network: string
   private readonly logger: Logger
-  private initPromise: Promise<Synapse> | undefined
 
   constructor(options: SynapseClientOptions) {
     this.privateKey = options.privateKey
     this.rpcUrl = options.rpcUrl
+    this.network = options.network ?? 'calibration'
     this.logger = options.logger.child({ module: 'synapse-client' })
   }
 
-  private async init(): Promise<Synapse> {
+  private getSynapse(): Synapse {
     if (this.synapse) return this.synapse
 
-    if (this.initPromise) return this.initPromise
+    const account = privateKeyToAccount(this.privateKey as Hex)
+    const chain = this.network === 'mainnet' ? filecoin : filecoinCalibration
+    const transport = this.rpcUrl ? http(this.rpcUrl) : http()
 
-    this.initPromise = Synapse.create({
-      privateKey: this.privateKey as `0x${string}`,
-      rpcUrl: this.rpcUrl,
-    }).then((synapse) => {
-      this.synapse = synapse
-      this.logger.info('synapse SDK initialized')
-      return synapse
+    // Use the Synapse constructor directly with a viem client
+    // Synapse.create() requires chains from @filoz/synapse-core which adds custom props,
+    // but the constructor with a viem client works with standard viem chains
+    const client = createWalletClient({
+      account,
+      chain,
+      transport,
     })
 
-    return this.initPromise
+    this.synapse = new Synapse({
+      client: client as any,
+      source: 'foc-s3-gateway',
+    })
+
+    this.logger.info({ address: account.address, network: this.network }, 'synapse SDK initialized')
+    return this.synapse
   }
 
   async upload(data: Uint8Array): Promise<{ pieceCid: string; size: number }> {
-    const synapse = await this.init()
+    const synapse = this.getSynapse()
 
     this.logger.info({ dataSize: data.length }, 'uploading to FOC')
 
@@ -68,7 +81,7 @@ export class SynapseClient {
   }
 
   async download(pieceCid: string): Promise<Uint8Array> {
-    const synapse = await this.init()
+    const synapse = this.getSynapse()
 
     this.logger.info({ pieceCid }, 'downloading from FOC')
 
@@ -79,8 +92,8 @@ export class SynapseClient {
     return data
   }
 
-  async getAddress(): Promise<string> {
-    const synapse = await this.init()
+  getAddress(): string {
+    const synapse = this.getSynapse()
     return synapse.client.account.address
   }
 }

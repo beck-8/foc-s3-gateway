@@ -13,14 +13,14 @@ export interface ServerOptions {
   port: number
   host: string
   privateKey: string
-  rpcUrl?: string
-  dbPath?: string
-  logger?: Logger
+  rpcUrl?: string | undefined
+  network?: string | undefined
+  dbPath?: string | undefined
 }
 
 export async function createServer(options: ServerOptions) {
   const app = Fastify({
-    logger: options.logger ?? {
+    logger: {
       level: 'info',
       transport: {
         target: 'pino-pretty',
@@ -41,6 +41,7 @@ export async function createServer(options: ServerOptions) {
   const synapseClient = new SynapseClient({
     privateKey: options.privateKey,
     rpcUrl: options.rpcUrl,
+    network: options.network,
     logger,
   })
 

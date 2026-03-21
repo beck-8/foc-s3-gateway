@@ -37,6 +37,6 @@ export interface ListObjectsV2Response {
 export interface S3ErrorResponse {
   code: string
   message: string
-  resource?: string
+  resource?: string | undefined
   requestId: string
 }

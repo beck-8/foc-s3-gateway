@@ -12,7 +12,9 @@
     "build": "tsc",
     "dev": "tsx watch src/cli.ts serve",
     "start": "node dist/cli.js serve",
-    "test": "npm run lint && npm run typecheck",
+    "test": "npm run lint && npm run typecheck && vitest run",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
     "lint": "biome check --no-errors-on-unmatched --files-ignore-unknown=true .",
     "lint:fix": "biome check --no-errors-on-unmatched --files-ignore-unknown=true --fix .",
     "typecheck": "tsc --noEmit"
@@ -28,7 +30,6 @@
   "license": "Apache-2.0 OR MIT",
   "dependencies": {
     "@filoz/synapse-sdk": "^0.40.0",
-    "@filoz/synapse-core": "^0.2.2",
     "better-sqlite3": "^11.8.1",
     "commander": "^14.0.3",
     "fast-xml-parser": "^5.2.3",
@@ -43,6 +44,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.0",
     "tsx": "~4.21.0",
-    "typescript": "~5.9.3"
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.0"
   }
 }
