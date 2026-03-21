@@ -1,0 +1,90 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/package-lock.json",
+      "!**/yarn.lock",
+      "!**/pnpm-lock.yaml"
+    ]
+  },
+  "vcs": {
+    "clientKind": "git",
+    "enabled": true,
+    "useIgnoreFile": true,
+    "defaultBranch": "main"
+  },
+  "formatter": {
+    "enabled": true,
+    "formatWithErrors": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineEnding": "lf",
+    "lineWidth": 120,
+    "attributePosition": "auto",
+    "includes": ["**"]
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on",
+        "useSortedAttributes": "on",
+        "useSortedKeys": "off"
+      }
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "complexity": {
+        "useSimpleNumberKeys": "off"
+      },
+      "correctness": {
+        "noUnusedVariables": "warn",
+        "noInvalidBuiltinInstantiation": "error",
+        "useImportExtensions": {
+          "level": "error",
+          "options": {
+            "forceJsExtensions": true
+          }
+        }
+      },
+      "style": {
+        "noNamespace": "error",
+        "noNegationElse": "error",
+        "noParameterAssign": "off",
+        "useCollapsedElseIf": "error",
+        "useFilenamingConvention": {
+          "level": "error",
+          "options": { "requireAscii": true, "filenameCases": ["kebab-case"] }
+        },
+        "useNodejsImportProtocol": "off",
+        "useDefaultParameterLast": "warn"
+      },
+      "suspicious": {
+        "noAssignInExpressions": "warn",
+        "noExportsInTest": "off",
+        "noEmptyBlockStatements": "error",
+        "useAwait": "off",
+        "noExplicitAny": "off"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "jsxQuoteStyle": "double",
+      "quoteProperties": "asNeeded",
+      "trailingCommas": "es5",
+      "semicolons": "asNeeded",
+      "arrowParentheses": "always",
+      "bracketSpacing": true,
+      "bracketSameLine": false,
+      "quoteStyle": "single",
+      "attributePosition": "auto"
+    }
+  }
+}

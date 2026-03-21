@@ -1,0 +1,48 @@
+{
+  "name": "foc-s3-gateway",
+  "version": "0.1.0",
+  "description": "S3-compatible gateway for Filecoin Onchain Cloud — use Rclone to read/write FOC storage",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "foc-s3-gateway": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/cli.ts serve",
+    "start": "node dist/cli.js serve",
+    "test": "npm run lint && npm run typecheck",
+    "lint": "biome check --no-errors-on-unmatched --files-ignore-unknown=true .",
+    "lint:fix": "biome check --no-errors-on-unmatched --files-ignore-unknown=true --fix .",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "filecoin",
+    "s3",
+    "rclone",
+    "foc",
+    "storage",
+    "gateway"
+  ],
+  "license": "Apache-2.0 OR MIT",
+  "dependencies": {
+    "@filoz/synapse-sdk": "^0.40.0",
+    "@filoz/synapse-core": "^0.2.2",
+    "better-sqlite3": "^11.8.1",
+    "commander": "^14.0.3",
+    "fast-xml-parser": "^5.2.3",
+    "fastify": "^5.7.4",
+    "multiformats": "^13.4.2",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.0.0",
+    "viem": "^2.46.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.5",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.0",
+    "tsx": "~4.21.0",
+    "typescript": "~5.9.3"
+  }
+}
