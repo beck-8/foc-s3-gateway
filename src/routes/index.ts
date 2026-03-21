@@ -85,16 +85,25 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     reply.status(204).send()
   })
 
-  // ── ListObjectsV2: GET /{bucket}?list-type=2 ──────────────────────
+  // ── ListObjectsV2 / GetBucketLocation: GET /{bucket} ────────────────
   app.get('/:bucket', async (request, reply) => {
     const { bucket } = request.params as { bucket: string }
     const query = request.query as Record<string, string>
-    logger.debug({ bucket, query }, 'ListObjectsV2')
 
     if (!metadataStore.bucketExists(bucket)) {
       sendNoSuchBucket(reply, bucket)
       return
     }
+
+    // GetBucketLocation: GET /bucket?location (used by mc to verify bucket exists)
+    if ('location' in query) {
+      logger.debug({ bucket }, 'GetBucketLocation')
+      reply.header('Content-Type', 'application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`)
+      return
+    }
+
+    logger.debug({ bucket, query }, 'ListObjectsV2')
 
     const prefix = query['prefix'] ?? ''
     const delimiter = query['delimiter'] ?? ''
@@ -155,9 +164,36 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   })
 
   // ── GetObject: GET /{bucket}/{key+} ─────────────────────────────────
+  //    When key is empty (e.g. GET /bucket/ with trailing slash), treat as ListObjectsV2.
   app.get('/:bucket/*', async (request, reply) => {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
+
+    // Trailing-slash requests (GET /bucket/) have empty key — redirect to list objects
+    if (!key) {
+      const query = request.query as Record<string, string>
+      logger.debug({ bucket, query }, 'ListObjectsV2 (trailing slash)')
+
+      if (!metadataStore.bucketExists(bucket)) {
+        sendNoSuchBucket(reply, bucket)
+        return
+      }
+
+      const prefix = query['prefix'] ?? ''
+      const delimiter = query['delimiter'] ?? ''
+      const maxKeys = Math.min(Number.parseInt(query['max-keys'] ?? '1000', 10), 1000)
+      const startAfter = query['start-after'] ?? query['continuation-token']
+
+      const { objects, commonPrefixes, isTruncated } = metadataStore.listObjects(bucket, prefix, delimiter, maxKeys, startAfter)
+      const lastKey = objects[objects.length - 1]?.key
+      const nextToken = isTruncated && lastKey ? lastKey : undefined
+
+      const response = { name: bucket, prefix, maxKeys, isTruncated, contents: objects, commonPrefixes, keyCount: objects.length }
+      const xml = buildListObjectsV2Xml(nextToken ? { ...response, nextContinuationToken: nextToken } : response)
+      reply.header('Content-Type', 'application/xml').send(xml)
+      return
+    }
+
     logger.debug({ bucket, key }, 'GetObject')
 
     if (!metadataStore.bucketExists(bucket)) {
