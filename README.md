@@ -114,6 +114,69 @@ Authentication is **optional**. If `--access-key` and `--secret-key` are provide
 
 Without credentials, the server runs in open mode (no auth).
 
+## How It Works
+
+### Upload (Async Staging)
+
+Uploads are **asynchronous** — files are staged to local disk first, and the gateway returns success immediately. A background worker then uploads to FOC in the background.
+
+```
+Client ──PUT──→ Gateway ──save──→ Local Disk ──200 OK──→ Client
+                                      │
+                          UploadWorker (background, 10 concurrent)
+                                      │
+                              Synapse SDK ──→ Filecoin SPs
+```
+
+- **Fast response**: PutObject returns in milliseconds (disk I/O only)
+- **Concurrent uploads**: Background worker processes up to 10 files in parallel
+- **Retry on failure**: Failed uploads retry up to 10 times; local file preserved
+- **Immediate availability**: Files can be downloaded immediately after upload (served from local disk)
+
+### Download (Local-First)
+
+Downloads prioritize local staged files before going to the network:
+
+1. **Local disk** — if the file is still staged locally (pending/uploading/failed), serve directly from disk
+2. **SP direct URLs** — try downloading from known storage provider URLs
+3. **SDK discovery** — fall back to Synapse SDK's provider discovery
+
+### Multipart Upload
+
+S3 multipart upload is fully supported for large files:
+
+```
+InitiateMultipartUpload → UploadPart (×N) → CompleteMultipartUpload
+```
+
+Parts are saved individually to disk, merged into a single file on complete, then queued for async FOC upload.
+
+## Upload Status API
+
+Monitor the upload queue via the gateway-specific status endpoint:
+
+```bash
+# Summary
+curl http://localhost:8333/_/status
+
+# Detailed (includes file lists)
+curl http://localhost:8333/_/status?detail=true
+```
+
+**Example response:**
+```json
+{
+  "uploads": { "pending": 3, "uploading": 2, "uploaded": 15, "failed": 1 },
+  "disk": {
+    "staging": { "files": 6, "totalBytes": 52428800, "totalSize": "50.0 MB" },
+    "multipartParts": { "files": 0, "totalBytes": 0, "totalSize": "0 B" }
+  },
+  "multipartUploads": 0
+}
+```
+
+With `?detail=true`, each pending/uploading/failed object is listed with `bucket`, `key`, `size`, `sizeFormatted`, `uploadAttempts`, and `updatedAt`.
+
 ## S3 Protocol Compatibility
 
 ### ✅ Supported Operations
@@ -125,17 +188,20 @@ Without credentials, the server runs in open mode (no auth).
 | DeleteBucket | Delete empty bucket (default protected) |
 | HeadBucket | Check bucket existence |
 | ListObjectsV2 | List with prefix/delimiter/pagination |
-| PutObject | Upload to FOC via Synapse SDK |
-| GetObject | Download from FOC (primary → secondary → SDK fallback) |
+| PutObject | Stage to local disk, async upload to FOC |
+| GetObject | Local-first download (disk → SP URLs → SDK) |
 | HeadObject | Get object metadata without downloading |
-| DeleteObject | Soft delete in SQLite (data remains on Filecoin) |
-| CopyObject | Copy metadata to new key (no re-upload, enables rename/move) |
+| DeleteObject | Soft delete + cleanup local staged file |
+| CopyObject | Copy metadata to new key (no re-upload) |
+| InitiateMultipartUpload | Start multipart upload session |
+| UploadPart | Upload individual part to disk |
+| CompleteMultipartUpload | Merge parts, stage for async FOC upload |
+| AbortMultipartUpload | Cancel and cleanup parts |
 
 ### ❌ Not Supported
 
 | Operation | Reason |
 |-----------|--------|
-| Multipart Upload | Not implemented |
 | DeleteObjects (batch) | Not implemented |
 | Versioning | No version management |
 | ACL / Bucket Policy | Single-user system |
@@ -150,8 +216,8 @@ Without credentials, the server runs in open mode (no auth).
 | Storage backend | AWS infrastructure | Filecoin SPs (on-chain proofs) |
 | **Min file size** | No minimum | **127 bytes** (PieceCID requirement) |
 | **Max file size** | 5 TiB (multipart) | **~1 GiB** (1,065,353,216 bytes) |
-| Upload latency | Milliseconds | Seconds~minutes (on-chain transaction) |
-| Storage copies | Region-based | Default 2 (1 primary + 1 secondary SP); may get fewer if fewer SPs available |
+| Upload latency | Milliseconds | **Milliseconds** (async staging); FOC upload happens in background |
+| Storage copies | Region-based | Default 2 (1 primary + 1 secondary SP) |
 | Delete | Immediate | Soft delete (metadata only; SP data retained) |
 | CopyObject | Server-side copy | Metadata-only copy (same PieceCID) |
 | Consistency | Strong | Local SQLite = strong; SP = eventual |
@@ -164,9 +230,9 @@ Without credentials, the server runs in open mode (no auth).
 |--------|-------------|
 | OPTIONS | DAV compliance headers |
 | PROPFIND | Directory listing / file properties |
-| GET | Download file |
-| PUT | Upload file |
-| DELETE | Delete file or bucket |
+| GET | Download file (local-first) |
+| PUT | Upload file (async staging) |
+| DELETE | Delete file or bucket + cleanup local files |
 | MKCOL | Create bucket (top-level directory) |
 | COPY | Copy file (metadata only) |
 | MOVE | Move / rename (copy + delete) |
@@ -197,24 +263,50 @@ DAV Class 2/3, Range requests, real locking, custom property persistence
 
 ```
 src/
-├── cli.ts                 # Commander.js CLI
-├── server.ts              # S3 Fastify server + startup
+├── cli.ts                    # Commander.js CLI
+├── server.ts                 # S3 Fastify server + startup
 ├── auth/
-│   └── index.ts           # Auth middleware (S3 Sig V4 AK + Basic Auth)
+│   └── index.ts              # Auth middleware (S3 Sig V4 AK + Basic Auth)
 ├── routes/
-│   └── index.ts           # S3 route handlers
+│   └── index.ts              # S3 route handlers (async upload + multipart + status API)
 ├── s3/
-│   ├── types.ts           # S3 type definitions
-│   ├── xml.ts             # S3 XML response builders
-│   └── errors.ts          # S3 error helpers
+│   ├── types.ts              # S3 type definitions
+│   ├── xml.ts                # S3 XML response builders (including multipart)
+│   └── errors.ts             # S3 error helpers
 ├── storage/
-│   ├── metadata-store.ts  # SQLite: objects + copies + buckets
-│   └── synapse-client.ts  # Synapse SDK wrapper (upload + fallback download)
+│   ├── metadata-store.ts     # SQLite: objects + copies + buckets + multipart + upload status
+│   ├── synapse-client.ts     # Synapse SDK wrapper (upload + fallback download)
+│   ├── local-store.ts        # Local disk staging (staging/ + multipart/ directories)
+│   ├── upload-worker.ts      # Background async FOC upload (10 concurrent, retry up to 10×)
+│   └── cleanup-worker.ts     # Background SP piece cleanup for deleted objects
 └── webdav/
-    ├── server.ts          # WebDAV Fastify server (separate port)
-    ├── routes.ts          # WebDAV method handlers
-    └── xml.ts             # DAV XML (multistatus) builders
+    ├── server.ts             # WebDAV Fastify server (separate port)
+    ├── routes.ts             # WebDAV method handlers (async upload + local-first download)
+    └── xml.ts                # DAV XML (multistatus) builders
 ```
+
+### Data Directory
+
+The gateway stores staged files alongside the database:
+
+```
+{dataDir}/
+├── metadata.db               # SQLite database
+├── staging/                   # Complete files waiting for FOC upload
+│   ├── {uuid-1}              # Regular PutObject staged file
+│   └── {uuid-2}              # Merged multipart upload
+└── multipart/                 # Temporary parts (during active multipart uploads)
+    └── {uploadId}/
+        ├── part-00001
+        ├── part-00002
+        └── ...
+```
+
+| Platform | Default Data Dir |
+|----------|------------------|
+| Linux | `~/.local/share/foc-s3-gateway/` |
+| macOS | `~/Library/Application Support/foc-s3-gateway/` |
+| Windows | `%APPDATA%/foc-s3-gateway/` |
 
 ## Configuration
 
@@ -231,22 +323,6 @@ src/
 | `-a, --access-key` | `ACCESS_KEY` | — | Authentication access key |
 | `-s, --secret-key` | `SECRET_KEY` | — | Authentication secret key |
 | `-w, --webdav-port` | — | S3 port + 1 | WebDAV server port |
-
-### Default Database Paths
-
-| Platform | Path |
-|----------|------|
-| Linux | `~/.local/share/foc-s3-gateway/metadata.db` |
-| macOS | `~/Library/Application Support/foc-s3-gateway/metadata.db` |
-| Windows | `%APPDATA%/foc-s3-gateway/metadata.db` |
-
-## How It Works
-
-1. **PutObject** → Data uploaded to FOC via `synapse.storage.upload()`. PieceCID + provider copy info stored in local SQLite
-2. **GetObject** → PieceCID looked up in SQLite, downloads via stored provider URLs (primary → secondary fallback → SDK discovery)
-3. **ListObjects** → Queried from local SQLite metadata with prefix/delimiter grouping
-4. **DeleteObject** → Soft delete in SQLite (data remains on Filecoin SP)
-5. **CopyObject** → SQLite metadata copy pointing to same PieceCID (no data movement)
 
 ## Development
 
