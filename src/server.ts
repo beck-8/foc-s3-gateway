@@ -7,8 +7,9 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import Fastify from 'fastify'
 import type { Logger } from 'pino'
-import { registerRoutes } from './routes/index.js'
 import { createAuthHook } from './auth/index.js'
+import { registerRoutes } from './routes/index.js'
+import { CleanupWorker } from './storage/cleanup-worker.js'
 import { MetadataStore } from './storage/metadata-store.js'
 import { SynapseClient } from './storage/synapse-client.js'
 import { startWebDavServer } from './webdav/server.js'
@@ -61,7 +62,7 @@ export async function createServer(options: ServerOptions) {
   // Disable Fastify's default content type parser for all types
   // so we can handle raw request bodies ourselves
   app.removeAllContentTypeParsers()
-  app.addContentTypeParser('*', function (_request, _payload, done) {
+  app.addContentTypeParser('*', (_request, _payload, done) => {
     done(null)
   })
 
@@ -81,18 +82,22 @@ export async function createServer(options: ServerOptions) {
   // Register S3 routes
   registerRoutes(app, { metadataStore, synapseClient, logger })
 
+  const cleanupWorker = new CleanupWorker({ metadataStore, synapseClient, logger })
+
   // Graceful shutdown
   app.addHook('onClose', () => {
+    cleanupWorker.stop()
     metadataStore.close()
   })
 
-  return { app, metadataStore, synapseClient }
+  return { app, metadataStore, synapseClient, cleanupWorker }
 }
 
 export async function startServer(options: ServerOptions): Promise<void> {
-  const { app, metadataStore, synapseClient } = await createServer(options)
+  const { app, metadataStore, synapseClient, cleanupWorker } = await createServer(options)
 
   try {
+    cleanupWorker.start()
     await app.listen({ port: options.port, host: options.host })
 
     const address = app.server.address()

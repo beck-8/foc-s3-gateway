@@ -57,12 +57,7 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
   })
 
   app.options('/', async (_request, reply) => {
-    reply
-      .status(200)
-      .header('Allow', 'OPTIONS, PROPFIND')
-      .header('DAV', '1')
-      .header('Content-Length', '0')
-      .send()
+    reply.status(200).header('Allow', 'OPTIONS, PROPFIND').header('DAV', '1').header('Content-Length', '0').send()
   })
 
   // ── PROPFIND ─────────────────────────────────────────────────────────
@@ -384,7 +379,7 @@ async function handlePropfind(
   request: FastifyRequest,
   reply: FastifyReply,
   metadataStore: MetadataStore,
-  logger: Logger,
+  logger: Logger
 ): Promise<void> {
   const { bucket, key } = parseDavPath(request.url)
   const depth = getDepth(request)
@@ -408,39 +403,7 @@ async function handlePropfind(
         })
       }
     }
-  } else if (!key) {
-    // Bucket level
-    if (!metadataStore.bucketExists(bucket)) {
-      reply.status(404).send('Not Found')
-      return
-    }
-
-    resources.push({ href: `/${bucket}/`, displayName: bucket, isCollection: true })
-
-    if (depth > 0) {
-      const { objects, commonPrefixes } = metadataStore.listObjects(bucket, '', '/', 10000)
-
-      for (const prefix of commonPrefixes) {
-        resources.push({
-          href: `/${bucket}/${prefix}`,
-          displayName: prefix.replace(/\/$/, '').split('/').pop() ?? prefix,
-          isCollection: true,
-        })
-      }
-
-      for (const obj of objects) {
-        resources.push({
-          href: `/${bucket}/${obj.key}`,
-          displayName: obj.key.split('/').pop() ?? obj.key,
-          isCollection: false,
-          contentLength: obj.size,
-          contentType: obj.contentType,
-          lastModified: obj.lastModified,
-          etag: obj.etag,
-        })
-      }
-    }
-  } else {
+  } else if (key) {
     // File or sub-directory level
     if (!metadataStore.bucketExists(bucket)) {
       reply.status(404).send('Not Found')
@@ -492,6 +455,38 @@ async function handlePropfind(
             etag: o.etag,
           })
         }
+      }
+    }
+  } else {
+    // Bucket level
+    if (!metadataStore.bucketExists(bucket)) {
+      reply.status(404).send('Not Found')
+      return
+    }
+
+    resources.push({ href: `/${bucket}/`, displayName: bucket, isCollection: true })
+
+    if (depth > 0) {
+      const { objects, commonPrefixes } = metadataStore.listObjects(bucket, '', '/', 10000)
+
+      for (const prefix of commonPrefixes) {
+        resources.push({
+          href: `/${bucket}/${prefix}`,
+          displayName: prefix.replace(/\/$/, '').split('/').pop() ?? prefix,
+          isCollection: true,
+        })
+      }
+
+      for (const obj of objects) {
+        resources.push({
+          href: `/${bucket}/${obj.key}`,
+          displayName: obj.key.split('/').pop() ?? obj.key,
+          isCollection: false,
+          contentLength: obj.size,
+          contentType: obj.contentType,
+          lastModified: obj.lastModified,
+          etag: obj.etag,
+        })
       }
     }
   }

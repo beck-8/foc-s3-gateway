@@ -16,10 +16,7 @@ import {
 
 describe('buildListBucketsXml', () => {
   it('generates valid XML with one bucket', () => {
-    const xml = buildListBucketsXml(
-      [{ name: 'default', creationDate: '2025-01-01T00:00:00.000Z' }],
-      '0xabc123'
-    )
+    const xml = buildListBucketsXml([{ name: 'default', creationDate: '2025-01-01T00:00:00.000Z' }], '0xabc123')
 
     expect(xml).toContain('<?xml version="1.0"')
     expect(xml).toContain('<ListAllMyBucketsResult')
@@ -51,10 +48,7 @@ describe('buildListBucketsXml', () => {
   })
 
   it('escapes special characters in bucket names', () => {
-    const xml = buildListBucketsXml(
-      [{ name: 'test<>&"\'bucket', creationDate: '2025-01-01T00:00:00.000Z' }],
-      'owner'
-    )
+    const xml = buildListBucketsXml([{ name: 'test<>&"\'bucket', creationDate: '2025-01-01T00:00:00.000Z' }], 'owner')
 
     expect(xml).toContain('&lt;')
     expect(xml).toContain('&gt;')
@@ -133,8 +127,22 @@ describe('buildListObjectsV2Xml', () => {
       maxKeys: 2,
       isTruncated: true,
       contents: [
-        { key: 'a.txt', size: 10, lastModified: '2025-01-01T00:00:00Z', etag: 'e1', pieceCid: 'p1', contentType: 'text/plain' },
-        { key: 'b.txt', size: 20, lastModified: '2025-01-01T00:00:00Z', etag: 'e2', pieceCid: 'p2', contentType: 'text/plain' },
+        {
+          key: 'a.txt',
+          size: 10,
+          lastModified: '2025-01-01T00:00:00Z',
+          etag: 'e1',
+          pieceCid: 'p1',
+          contentType: 'text/plain',
+        },
+        {
+          key: 'b.txt',
+          size: 20,
+          lastModified: '2025-01-01T00:00:00Z',
+          etag: 'e2',
+          pieceCid: 'p2',
+          contentType: 'text/plain',
+        },
       ],
       commonPrefixes: [],
       keyCount: 2,
@@ -207,9 +215,7 @@ describe('buildDeleteResultXml', () => {
   })
 
   it('generates delete result with errors', () => {
-    const xml = buildDeleteResultXml([], [
-      { key: 'locked.txt', code: 'AccessDenied', message: 'Access denied' },
-    ])
+    const xml = buildDeleteResultXml([], [{ key: 'locked.txt', code: 'AccessDenied', message: 'Access denied' }])
 
     expect(xml).toContain('<Key>locked.txt</Key>')
     expect(xml).toContain('<Code>AccessDenied</Code>')
@@ -217,10 +223,7 @@ describe('buildDeleteResultXml', () => {
   })
 
   it('handles mixed deleted and errors', () => {
-    const xml = buildDeleteResultXml(
-      ['ok.txt'],
-      [{ key: 'fail.txt', code: 'InternalError', message: 'Failed' }]
-    )
+    const xml = buildDeleteResultXml(['ok.txt'], [{ key: 'fail.txt', code: 'InternalError', message: 'Failed' }])
 
     expect(xml).toContain('<Deleted><Key>ok.txt</Key></Deleted>')
     expect(xml).toContain('<Key>fail.txt</Key>')

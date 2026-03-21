@@ -3,8 +3,8 @@
  */
 
 import Fastify from 'fastify'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import pino from 'pino'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createAuthHook } from './index.js'
 
 const logger = pino({ level: 'silent' })
@@ -49,7 +49,8 @@ describe('Auth Middleware', () => {
         method: 'GET',
         url: '/test',
         headers: {
-          authorization: 'AWS4-HMAC-SHA256 Credential=wrong-key/20250321/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc',
+          authorization:
+            'AWS4-HMAC-SHA256 Credential=wrong-key/20250321/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc',
         },
       })
 

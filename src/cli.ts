@@ -9,10 +9,7 @@ import { startServer } from './server.js'
 
 const program = new Command()
 
-program
-  .name('foc-s3-gateway')
-  .description('S3-compatible gateway for Filecoin Onchain Cloud')
-  .version('0.1.0')
+program.name('foc-s3-gateway').description('S3-compatible gateway for Filecoin Onchain Cloud').version('0.1.0')
 
 program
   .command('serve')

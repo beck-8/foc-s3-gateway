@@ -2,11 +2,11 @@
  * Tests for WebDAV routes.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { FastifyInstance } from 'fastify'
 import pino from 'pino'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MetadataStore } from '../storage/metadata-store.js'
 import { createWebDavServer } from './server.js'
-import type { FastifyInstance } from 'fastify'
 
 const logger = pino({ level: 'silent' })
 

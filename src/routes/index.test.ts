@@ -8,8 +8,8 @@
 import Fastify from 'fastify'
 import pino from 'pino'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { registerRoutes } from './index.js'
 import { MetadataStore } from '../storage/metadata-store.js'
+import { registerRoutes } from './index.js'
 
 const logger = pino({ level: 'silent' })
 
@@ -44,7 +44,7 @@ describe('S3 Routes', () => {
 
     // Disable body parsing so PutObject can read raw
     app.removeAllContentTypeParsers()
-    app.addContentTypeParser('*', function (_request, _payload, done) {
+    app.addContentTypeParser('*', (_request, _payload, done) => {
       done(null)
     })
 

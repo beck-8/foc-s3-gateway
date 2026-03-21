@@ -76,10 +76,7 @@ export function createAuthHook(options: AuthOptions) {
       const creds = extractBasicAuth(authHeader)
       if (!creds || creds.username !== accessKey || creds.password !== secretKey) {
         logger.warn({ url: request.url }, 'invalid basic auth credentials')
-        reply
-          .status(401)
-          .header('WWW-Authenticate', 'Basic realm="FOC Gateway"')
-          .send('Unauthorized')
+        reply.status(401).header('WWW-Authenticate', 'Basic realm="FOC Gateway"').send('Unauthorized')
         return
       }
       return // Credentials match → authorized

@@ -39,7 +39,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     if (metadataStore.bucketExists(bucket)) {
       // S3 returns 409 BucketAlreadyOwnedByYou — but many clients tolerate 200
-      sendS3Error(reply, 409, 'BucketAlreadyOwnedByYou', 'Your previous request to create the named bucket succeeded and you already own it.', bucket)
+      sendS3Error(
+        reply,
+        409,
+        'BucketAlreadyOwnedByYou',
+        'Your previous request to create the named bucket succeeded and you already own it.',
+        bucket
+      )
       return
     }
 
@@ -117,9 +123,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       keyCount: objects.length,
     }
 
-    const xml = buildListObjectsV2Xml(
-      nextToken ? { ...response, nextContinuationToken: nextToken } : response
-    )
+    const xml = buildListObjectsV2Xml(nextToken ? { ...response, nextContinuationToken: nextToken } : response)
 
     reply.header('Content-Type', 'application/xml').send(xml)
   })
@@ -233,8 +237,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const contentLength = request.headers['content-length']
         ? Number.parseInt(request.headers['content-length'] as string, 10)
         : undefined
-      const contentType =
-        (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
+      const contentType = (request.headers['content-type'] as string | undefined) ?? 'application/octet-stream'
 
       // Validate size from Content-Length header (fast path, no buffering)
       const MIN_UPLOAD_SIZE = 127
@@ -249,13 +252,23 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           return
         }
         if (contentLength < MIN_UPLOAD_SIZE) {
-          sendS3Error(reply, 400, 'EntityTooSmall',
-            `Object size ${contentLength} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`, key)
+          sendS3Error(
+            reply,
+            400,
+            'EntityTooSmall',
+            `Object size ${contentLength} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`,
+            key
+          )
           return
         }
         if (contentLength > MAX_UPLOAD_SIZE) {
-          sendS3Error(reply, 400, 'EntityTooLarge',
-            `Object size ${contentLength} bytes exceeds maximum ${MAX_UPLOAD_SIZE} bytes (~1 GiB).`, key)
+          sendS3Error(
+            reply,
+            400,
+            'EntityTooLarge',
+            `Object size ${contentLength} bytes exceeds maximum ${MAX_UPLOAD_SIZE} bytes (~1 GiB).`,
+            key
+          )
           return
         }
       }
@@ -288,18 +301,20 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
       // Verify size after streaming (in case Content-Length was missing/wrong)
       if (totalBytes < MIN_UPLOAD_SIZE) {
-        sendS3Error(reply, 400, 'EntityTooSmall',
-          `Object size ${totalBytes} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`, key)
+        sendS3Error(
+          reply,
+          400,
+          'EntityTooSmall',
+          `Object size ${totalBytes} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`,
+          key
+        )
         return
       }
 
       // Store metadata
       metadataStore.putObject(bucket, key, result.pieceCid, result.size, contentType, etag, result.copies)
 
-      reply
-        .status(200)
-        .header('ETag', `"${etag}"`)
-        .send()
+      reply.status(200).header('ETag', `"${etag}"`).send()
     } catch (error) {
       logger.error({ error, bucket, key }, 'upload failed')
       sendInternalError(reply, 'Failed to upload object to FOC storage')

@@ -67,16 +67,30 @@ export class MetadataStore {
         key TEXT NOT NULL,
         provider_id TEXT NOT NULL,
         data_set_id TEXT NOT NULL,
+        piece_id TEXT NOT NULL,
         retrieval_url TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'primary',
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (bucket, key, provider_id)
       );
 
+      CREATE TABLE IF NOT EXISTS pending_deletions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        piece_cid TEXT NOT NULL,
+        piece_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        data_set_id TEXT NOT NULL,
+        retrieval_url TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_attempt TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
       CREATE INDEX IF NOT EXISTS idx_objects_bucket ON objects(bucket);
       CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_objects_piece_cid ON objects(piece_cid);
       CREATE INDEX IF NOT EXISTS idx_copies_piece ON object_copies(bucket, key);
+      CREATE INDEX IF NOT EXISTS idx_pending_piece_cid ON pending_deletions(piece_cid);
     `)
 
     // Ensure default bucket always exists
@@ -101,9 +115,7 @@ export class MetadataStore {
     if (name === 'default') return false
 
     // Check if bucket has objects
-    const hasObjects = this.db.prepare(
-      'SELECT 1 FROM objects WHERE bucket = ? AND deleted = 0 LIMIT 1'
-    ).get(name)
+    const hasObjects = this.db.prepare('SELECT 1 FROM objects WHERE bucket = ? AND deleted = 0 LIMIT 1').get(name)
     if (hasObjects) return false
 
     const stmt = this.db.prepare('DELETE FROM buckets WHERE name = ?')
@@ -124,7 +136,15 @@ export class MetadataStore {
   // ── Object operations ──────────────────────────────────────────────
 
   putObject(options: PutObjectOptions): void
-  putObject(bucket: string, key: string, pieceCid: string, size: number, contentType: string, etag: string, copies?: CopyInfo[]): void
+  putObject(
+    bucket: string,
+    key: string,
+    pieceCid: string,
+    size: number,
+    contentType: string,
+    etag: string,
+    copies?: CopyInfo[]
+  ): void
   putObject(
     bucketOrOptions: string | PutObjectOptions,
     key?: string,
@@ -184,11 +204,11 @@ export class MetadataStore {
         this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, k)
 
         const insertCopy = this.db.prepare(`
-          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, retrieval_url, role)
-          VALUES (?, ?, ?, ?, ?, ?)
+          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
         `)
         for (const copy of cp) {
-          insertCopy.run(bucket, k, copy.providerId, copy.dataSetId, copy.retrievalUrl, copy.role)
+          insertCopy.run(bucket, k, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
         }
       }
     })
@@ -209,12 +229,14 @@ export class MetadataStore {
 
   /** Get copy records for an object — used for choosing download source */
   getObjectCopies(bucket: string, key: string): CopyInfo[] {
-    const rows = this.db.prepare(`
-      SELECT provider_id as providerId, data_set_id as dataSetId, retrieval_url as retrievalUrl, role
+    const rows = this.db
+      .prepare(`
+      SELECT provider_id as providerId, data_set_id as dataSetId, piece_id as pieceId, retrieval_url as retrievalUrl, role
       FROM object_copies
       WHERE bucket = ? AND key = ?
       ORDER BY role ASC
-    `).all(bucket, key)
+    `)
+      .all(bucket, key)
     return rows as CopyInfo[]
   }
 
@@ -275,12 +297,98 @@ export class MetadataStore {
   }
 
   deleteObject(bucket: string, key: string): boolean {
-    const stmt = this.db.prepare(`
-      UPDATE objects SET deleted = 1, updated_at = datetime('now')
-      WHERE bucket = ? AND key = ? AND deleted = 0
+    let deleted = false
+
+    const transaction = this.db.transaction(() => {
+      // Get the object's piece_cid and copies before deleting
+      const obj = this.db
+        .prepare('SELECT piece_cid FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
+        .get(bucket, key) as { piece_cid: string } | undefined
+
+      if (!obj) return
+
+      const copies = this.db
+        .prepare(
+          'SELECT provider_id, data_set_id, piece_id, retrieval_url FROM object_copies WHERE bucket = ? AND key = ?'
+        )
+        .all(bucket, key) as Array<{
+        provider_id: string
+        data_set_id: string
+        piece_id: string
+        retrieval_url: string
+      }>
+
+      // Soft-delete the object
+      this.db
+        .prepare(`UPDATE objects SET deleted = 1, updated_at = datetime('now') WHERE bucket = ? AND key = ?`)
+        .run(bucket, key)
+
+      // Remove copy records
+      this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, key)
+
+      // Check if any other non-deleted object still references this piece_cid
+      const otherRef = this.db
+        .prepare('SELECT 1 FROM objects WHERE piece_cid = ? AND deleted = 0 LIMIT 1')
+        .get(obj.piece_cid)
+
+      // No other references -- queue copies for SP cleanup
+      if (!otherRef && copies.length > 0) {
+        const insertPending = this.db.prepare(`
+          INSERT INTO pending_deletions (piece_cid, piece_id, provider_id, data_set_id, retrieval_url)
+          VALUES (?, ?, ?, ?, ?)
+        `)
+        for (const copy of copies) {
+          insertPending.run(obj.piece_cid, copy.piece_id, copy.provider_id, copy.data_set_id, copy.retrieval_url)
+        }
+        this.logger.info(
+          { bucket, key, pieceCid: obj.piece_cid, pendingCount: copies.length },
+          'piece queued for SP cleanup (no remaining references)'
+        )
+      }
+
+      deleted = true
+    })
+
+    transaction()
+    return deleted
+  }
+
+  // -- Pending deletion helpers (used by cleanup worker) --
+
+  /** Pending deletion record for the cleanup worker */
+  getPendingDeletions(limit = 10): Array<{
+    id: number
+    piece_cid: string
+    piece_id: string
+    provider_id: string
+    data_set_id: string
+    retrieval_url: string
+    attempts: number
+  }> {
+    return this.db
+      .prepare(`
+      SELECT id, piece_cid, piece_id, provider_id, data_set_id, retrieval_url, attempts
+      FROM pending_deletions
+      WHERE attempts < 5
+      ORDER BY created_at ASC
+      LIMIT ?
     `)
-    const result = stmt.run(bucket, key)
-    return result.changes > 0
+      .all(limit) as any
+  }
+
+  /** Remove a pending deletion after successful SP cleanup */
+  removePendingDeletion(id: number): void {
+    this.db.prepare('DELETE FROM pending_deletions WHERE id = ?').run(id)
+  }
+
+  /** Increment attempt counter after a failed cleanup try */
+  incrementDeletionAttempt(id: number): void {
+    this.db
+      .prepare(`
+      UPDATE pending_deletions SET attempts = attempts + 1, last_attempt = datetime('now')
+      WHERE id = ?
+    `)
+      .run(id)
   }
 
   /**
@@ -296,7 +404,8 @@ export class MetadataStore {
 
     const transaction = this.db.transaction(() => {
       // Insert/replace destination object with same pieceCid
-      this.db.prepare(`
+      this.db
+        .prepare(`
         INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, updated_at, deleted)
         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
         ON CONFLICT (bucket, key) DO UPDATE SET
@@ -307,17 +416,18 @@ export class MetadataStore {
           copies_count = excluded.copies_count,
           updated_at = datetime('now'),
           deleted = 0
-      `).run(dstBucket, dstKey, src.pieceCid, src.size, src.contentType, src.etag, srcCopies.length)
+      `)
+        .run(dstBucket, dstKey, src.pieceCid, src.size, src.contentType, src.etag, srcCopies.length)
 
       // Copy provider records
       if (srcCopies.length > 0) {
         this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(dstBucket, dstKey)
         const insertCopy = this.db.prepare(`
-          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, retrieval_url, role)
-          VALUES (?, ?, ?, ?, ?, ?)
+          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
         `)
         for (const copy of srcCopies) {
-          insertCopy.run(dstBucket, dstKey, copy.providerId, copy.dataSetId, copy.retrievalUrl, copy.role)
+          insertCopy.run(dstBucket, dstKey, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
         }
       }
     })
@@ -329,9 +439,7 @@ export class MetadataStore {
   }
 
   objectExists(bucket: string, key: string): boolean {
-    const stmt = this.db.prepare(
-      'SELECT 1 FROM objects WHERE bucket = ? AND key = ? AND deleted = 0'
-    )
+    const stmt = this.db.prepare('SELECT 1 FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
     return stmt.get(bucket, key) !== undefined
   }
 

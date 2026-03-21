@@ -91,10 +91,11 @@ export function buildCopyObjectResultXml(etag: string, lastModified: string): st
 </CopyObjectResult>`
 }
 
-export function buildDeleteResultXml(deleted: string[], errors: Array<{ key: string; code: string; message: string }>): string {
-  const deletedEntries = deleted
-    .map((key) => `  <Deleted><Key>${escapeXml(key)}</Key></Deleted>`)
-    .join('\n')
+export function buildDeleteResultXml(
+  deleted: string[],
+  errors: Array<{ key: string; code: string; message: string }>
+): string {
+  const deletedEntries = deleted.map((key) => `  <Deleted><Key>${escapeXml(key)}</Key></Deleted>`).join('\n')
 
   const errorEntries = errors
     .map(

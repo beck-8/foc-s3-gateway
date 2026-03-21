@@ -45,7 +45,7 @@ export async function createWebDavServer(options: WebDavServerOptions) {
 
   // Raw body handling
   app.removeAllContentTypeParsers()
-  app.addContentTypeParser('*', function (_request: any, _payload: any, done: any) {
+  app.addContentTypeParser('*', (_request: any, _payload: any, done: any) => {
     done(null)
   })
 

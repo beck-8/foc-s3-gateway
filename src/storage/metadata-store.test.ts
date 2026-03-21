@@ -107,8 +107,20 @@ describe('MetadataStore', () => {
 
   describe('putObject with copies / getObjectCopies', () => {
     const testCopies = [
-      { providerId: '42', dataSetId: '100', retrievalUrl: 'https://sp1.example.com/piece/baga1', role: 'primary' as const },
-      { providerId: '99', dataSetId: '200', retrievalUrl: 'https://sp2.example.com/piece/baga1', role: 'secondary' as const },
+      {
+        providerId: '42',
+        dataSetId: '100',
+        pieceId: '1000',
+        retrievalUrl: 'https://sp1.example.com/piece/baga1',
+        role: 'primary' as const,
+      },
+      {
+        providerId: '99',
+        dataSetId: '200',
+        pieceId: '1000',
+        retrievalUrl: 'https://sp2.example.com/piece/baga1',
+        role: 'secondary' as const,
+      },
     ]
 
     it('stores and retrieves copies', () => {
@@ -136,7 +148,13 @@ describe('MetadataStore', () => {
       store.putObject('default', 'evolving.txt', 'cid-v1', 100, 'text/plain', 'e1', testCopies)
 
       const newCopies = [
-        { providerId: '77', dataSetId: '300', retrievalUrl: 'https://sp3.example.com/piece/cid-v2', role: 'primary' as const },
+        {
+          providerId: '77',
+          dataSetId: '300',
+          pieceId: '3000',
+          retrievalUrl: 'https://sp3.example.com/piece/cid-v2',
+          role: 'primary' as const,
+        },
       ]
       store.putObject('default', 'evolving.txt', 'cid-v2', 200, 'text/plain', 'e2', newCopies)
 
@@ -169,7 +187,13 @@ describe('MetadataStore', () => {
 
   describe('copyObject', () => {
     const copies = [
-      { providerId: '42', dataSetId: '100', retrievalUrl: 'https://sp1.example.com/baga1', role: 'primary' as const },
+      {
+        providerId: '42',
+        dataSetId: '100',
+        pieceId: '1000',
+        retrievalUrl: 'https://sp1.example.com/baga1',
+        role: 'primary' as const,
+      },
     ]
 
     it('copies within same bucket', () => {

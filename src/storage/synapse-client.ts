@@ -5,10 +5,10 @@
  * that the S3 routes delegate to.
  */
 
-import { Synapse } from '@filoz/synapse-sdk'
 import { calibration, mainnet } from '@filoz/synapse-core/chains'
+import { Synapse } from '@filoz/synapse-sdk'
 import type { Logger } from 'pino'
-import { type Hex, createWalletClient, http } from 'viem'
+import { createWalletClient, type Hex, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 
 export interface SynapseClientOptions {
@@ -22,6 +22,7 @@ export interface SynapseClientOptions {
 export interface CopyInfo {
   providerId: string
   dataSetId: string
+  pieceId: string
   retrievalUrl: string
   role: 'primary' | 'secondary'
 }
@@ -80,6 +81,7 @@ export class SynapseClient {
     const copies: CopyInfo[] = result.copies.map((copy) => ({
       providerId: copy.providerId.toString(),
       dataSetId: copy.dataSetId.toString(),
+      pieceId: copy.pieceId.toString(),
       retrievalUrl: copy.retrievalUrl,
       role: copy.role,
     }))
@@ -118,10 +120,7 @@ export class SynapseClient {
     // Try stored retrieval URLs first (fast path — no chain lookups)
     for (const copy of sorted) {
       try {
-        this.logger.debug(
-          { pieceCid, providerId: copy.providerId, role: copy.role },
-          'trying direct download'
-        )
+        this.logger.debug({ pieceCid, providerId: copy.providerId, role: copy.role }, 'trying direct download')
 
         const response = await fetch(copy.retrievalUrl)
         if (response.ok) {
@@ -138,10 +137,7 @@ export class SynapseClient {
           'direct download failed, trying next'
         )
       } catch (error) {
-        this.logger.warn(
-          { pieceCid, providerId: copy.providerId, error },
-          'direct download error, trying next'
-        )
+        this.logger.warn({ pieceCid, providerId: copy.providerId, error }, 'direct download error, trying next')
       }
     }
 
@@ -152,6 +148,40 @@ export class SynapseClient {
 
     this.logger.info({ pieceCid, size: data.length }, 'SDK download complete')
     return data
+  }
+
+  // ── Delete ────────────────────────────────────────────────────────
+
+  /**
+   * Delete a piece from a Service Provider.
+   * This sends an EIP-712 signed request to the SP's API.
+   */
+  async deletePiece(options: { dataSetId: string; pieceId: string; serviceURL: string }): Promise<void> {
+    const synapse = this.getSynapse()
+
+    // We need to use the synapse-core low-level schedulePieceDeletion
+    // But since it's not exported from the main sdk right now, we can use the inner components
+    // Actually, Synapse SDK might expose it or we can import it from synapse-core
+    const { schedulePieceDeletion } = await import('@filoz/synapse-core/sp')
+
+    // For clientDataSetId, we need a unique nonce per data set. Usually 1n is fine if we only delete once,
+    // but standard practice is Date.now() or similar.
+    const clientDataSetId = BigInt(Date.now())
+
+    await schedulePieceDeletion(synapse.client as any, {
+      dataSetId: BigInt(options.dataSetId),
+      pieceId: BigInt(options.pieceId),
+      clientDataSetId,
+      serviceURL: options.serviceURL,
+    })
+
+    this.logger.debug(
+      {
+        dataSetId: options.dataSetId,
+        pieceId: options.pieceId,
+      },
+      'piece deletion scheduled on SP'
+    )
   }
 
   getAddress(): string {
