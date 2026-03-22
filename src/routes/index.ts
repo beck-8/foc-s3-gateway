@@ -496,6 +496,18 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           )
           return
         }
+        if (merged.size > MAX_UPLOAD_SIZE) {
+          localStore.delete(merged.localPath)
+          metadataStore.deleteMultipartUpload(uploadId)
+          sendS3Error(
+            reply,
+            400,
+            'EntityTooLarge',
+            `Object size ${merged.size} bytes exceeds maximum ${MAX_UPLOAD_SIZE} bytes (~1 GiB).`,
+            key
+          )
+          return
+        }
 
         // Stage for async FOC upload
         metadataStore.stageObject(bucket, key, merged.size, upload.contentType, merged.etag, merged.localPath)
@@ -650,6 +662,17 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           400,
           'EntityTooSmall',
           `Object size ${staged.size} bytes is below minimum ${MIN_UPLOAD_SIZE} bytes required by Filecoin storage providers.`,
+          key
+        )
+        return
+      }
+      if (staged.size > MAX_UPLOAD_SIZE) {
+        localStore.delete(staged.localPath)
+        sendS3Error(
+          reply,
+          400,
+          'EntityTooLarge',
+          `Object size ${staged.size} bytes exceeds maximum ${MAX_UPLOAD_SIZE} bytes (~1 GiB).`,
           key
         )
         return

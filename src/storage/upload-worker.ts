@@ -122,20 +122,53 @@ export class UploadWorker {
       return
     }
 
+    // Validate file size before upload attempt (1 GiB max for FOC)
+    const maxUploadSize = 1_065_353_216
+    if (item.size > maxUploadSize) {
+      this.logger.error(
+        { bucket, key, size: item.size, maxUploadSize },
+        'file exceeds maximum upload size, marking failed'
+      )
+      this.metadataStore.markUploadFailed(bucket, key)
+      return
+    }
+
     this.activeCount++
     try {
       this.metadataStore.markUploading(bucket, key)
       this.logger.info({ bucket, key, size: item.size }, 'uploading to FOC')
 
       // Create a web ReadableStream from the local file
+      // controller.enqueue is wrapped in try/catch to prevent crash if the
+      // consumer (Synapse SDK) closes the stream early (e.g. on size error)
       const fileStream = this.localStore.createReadStream(localPath)
       const webStream = new ReadableStream<Uint8Array>({
         start(controller) {
           fileStream.on('data', (chunk) => {
-            controller.enqueue(new Uint8Array(Buffer.from(chunk)))
+            try {
+              controller.enqueue(new Uint8Array(Buffer.from(chunk)))
+            } catch {
+              // Stream was closed by consumer — stop reading
+              fileStream.destroy()
+            }
           })
-          fileStream.on('end', () => controller.close())
-          fileStream.on('error', (err) => controller.error(err))
+          fileStream.on('end', () => {
+            try {
+              controller.close()
+            } catch {
+              // Already closed
+            }
+          })
+          fileStream.on('error', (err) => {
+            try {
+              controller.error(err)
+            } catch {
+              // Already closed/errored
+            }
+          })
+        },
+        cancel() {
+          fileStream.destroy()
         },
       })
 

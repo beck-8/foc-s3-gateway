@@ -183,6 +183,11 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         reply.status(400).send(`File too small: ${staged.size} bytes (minimum ${MIN_UPLOAD_SIZE} bytes)`)
         return
       }
+      if (staged.size > MAX_UPLOAD_SIZE) {
+        localStore.delete(staged.localPath)
+        reply.status(413).send(`File too large: ${staged.size} bytes (maximum ~1 GiB)`)
+        return
+      }
 
       // Store metadata with status=pending, return immediately
       metadataStore.stageObject(bucket, key, staged.size, contentType, staged.etag, staged.localPath)
