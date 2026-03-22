@@ -53,8 +53,26 @@ export function createAuthHook(options: AuthOptions) {
   return async function authHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const authHeader = request.headers.authorization
 
-    // No auth header → 403
+    // No auth header → check for presigned URL (query string auth)
     if (!authHeader) {
+      const query = request.query as Record<string, string>
+
+      // S3 Presigned URL: ?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AK/date/region/s3/aws4_request
+      if (query['X-Amz-Algorithm'] === 'AWS4-HMAC-SHA256' && query['X-Amz-Credential']) {
+        const ak = query['X-Amz-Credential'].split('/')[0]
+        if (ak !== accessKey) {
+          logger.warn({ url: request.url, providedAK: ak }, 'invalid presigned URL access key')
+          sendAuthError(reply, request.url)
+          return
+        }
+        return // Presigned URL access key matches → authorized
+      }
+
+      // Skip auth for internal endpoints (status API)
+      if (request.url.startsWith('/_/')) {
+        return
+      }
+
       logger.warn({ url: request.url, method: request.method }, 'missing auth header')
       sendAuthError(reply, request.url)
       return
