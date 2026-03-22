@@ -366,6 +366,19 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return
       }
 
+      // Empty files (0B, no pieceCid) — return empty body with correct headers
+      if (!obj.pieceCid || obj.size === 0) {
+        reply
+          .status(200)
+          .header('Content-Type', obj.contentType)
+          .header('Content-Length', '0')
+          .header('ETag', `"${obj.etag}"`)
+          .header('Last-Modified', new Date(obj.lastModified).toUTCString())
+          .header('Accept-Ranges', 'bytes')
+          .send('')
+        return
+      }
+
       // Fall back to FOC download (direct SP URLs → SDK discovery)
       const copies = metadataStore.getObjectCopies(bucket, key)
       const { stream } = await synapseClient.download(obj.pieceCid, copies)
