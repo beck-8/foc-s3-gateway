@@ -297,6 +297,43 @@ export class MetadataStore {
     `)
 
     const transaction = this.db.transaction(() => {
+      // Clean up old copies if overwriting an existing object with different pieceCid
+      const existing = this.db
+        .prepare('SELECT piece_cid FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
+        .get(bucket, k) as { piece_cid: string } | undefined
+
+      if (existing?.piece_cid && existing.piece_cid !== pc) {
+        const oldCopies = this.db
+          .prepare(
+            'SELECT provider_id, data_set_id, piece_id, retrieval_url FROM object_copies WHERE bucket = ? AND key = ?'
+          )
+          .all(bucket, k) as Array<{
+          provider_id: string
+          data_set_id: string
+          piece_id: string
+          retrieval_url: string
+        }>
+
+        // Check if any OTHER object still references the old pieceCid
+        const otherRef = this.db
+          .prepare('SELECT 1 FROM objects WHERE piece_cid = ? AND deleted = 0 AND NOT (bucket = ? AND key = ?) LIMIT 1')
+          .get(existing.piece_cid, bucket, k)
+
+        if (!otherRef && oldCopies.length > 0) {
+          const insertPending = this.db.prepare(`
+            INSERT INTO pending_deletions (piece_cid, piece_id, provider_id, data_set_id, retrieval_url)
+            VALUES (?, ?, ?, ?, ?)
+          `)
+          for (const copy of oldCopies) {
+            insertPending.run(existing.piece_cid, copy.piece_id, copy.provider_id, copy.data_set_id, copy.retrieval_url)
+          }
+          this.logger.info(
+            { bucket, key: k, oldPieceCid: existing.piece_cid, pendingCount: oldCopies.length },
+            'old copies queued for SP cleanup (putObject overwrite)'
+          )
+        }
+      }
+
       putStmt.run(bucket, k, pc, sz, ct, et, copiesCount)
 
       // Replace copy records if provided
@@ -523,6 +560,44 @@ export class MetadataStore {
     const srcCopies = this.getObjectCopies(srcBucket, srcKey)
 
     const transaction = this.db.transaction(() => {
+      // Clean up old copies if destination exists with a different pieceCid
+      const existing = this.db
+        .prepare('SELECT piece_cid FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
+        .get(dstBucket, dstKey) as { piece_cid: string } | undefined
+
+      if (existing?.piece_cid && existing.piece_cid !== src.pieceCid) {
+        const oldCopies = this.db
+          .prepare(
+            'SELECT provider_id, data_set_id, piece_id, retrieval_url FROM object_copies WHERE bucket = ? AND key = ?'
+          )
+          .all(dstBucket, dstKey) as Array<{
+          provider_id: string
+          data_set_id: string
+          piece_id: string
+          retrieval_url: string
+        }>
+
+        const otherRef = this.db
+          .prepare(
+            'SELECT 1 FROM objects WHERE piece_cid = ? AND deleted = 0 AND NOT (bucket = ? AND key = ?) LIMIT 1'
+          )
+          .get(existing.piece_cid, dstBucket, dstKey)
+
+        if (!otherRef && oldCopies.length > 0) {
+          const insertPending = this.db.prepare(`
+            INSERT INTO pending_deletions (piece_cid, piece_id, provider_id, data_set_id, retrieval_url)
+            VALUES (?, ?, ?, ?, ?)
+          `)
+          for (const copy of oldCopies) {
+            insertPending.run(existing.piece_cid, copy.piece_id, copy.provider_id, copy.data_set_id, copy.retrieval_url)
+          }
+          this.logger.info(
+            { dstBucket, dstKey, oldPieceCid: existing.piece_cid, pendingCount: oldCopies.length },
+            'old copies queued for SP cleanup (copyObject overwrite)'
+          )
+        }
+      }
+
       // Insert/replace destination object with same pieceCid
       this.db
         .prepare(`
