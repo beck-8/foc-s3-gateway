@@ -185,11 +185,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return
     }
 
-    // GetBucketLocation: GET /bucket?location (used by mc to verify bucket exists)
+    // GetBucketLocation: GET /bucket?location (used by mc to determine signing region)
     if ('location' in query) {
       logger.debug({ bucket }, 'GetBucketLocation')
       reply.header('Content-Type', 'application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`)
+<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`)
       return
     }
 
