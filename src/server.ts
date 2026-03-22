@@ -63,6 +63,12 @@ export async function createServer(options: ServerOptions) {
   })
   const localStore = new LocalStore({ dataDir, logger })
 
+  // Validate wallet address — ensures the PRIVATE_KEY matches the one
+  // used when this database was first created. Prevents accidental key changes
+  // that would break uploads, downloads, and deletions.
+  const walletAddress = synapseClient.getAddress()
+  metadataStore.validateWalletAddress(walletAddress)
+
   // Parse XML bodies as strings (needed for DeleteObjects, etc.)
   // All other content types pass through as raw streams (for PutObject uploads)
   app.removeAllContentTypeParsers()

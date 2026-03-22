@@ -107,6 +107,11 @@ export class MetadataStore {
         PRIMARY KEY (upload_id, part_number)
       );
 
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_objects_bucket ON objects(bucket);
       CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_objects_piece_cid ON objects(piece_cid);
@@ -147,6 +152,48 @@ export class MetadataStore {
       this.db.exec('ALTER TABLE objects ADD COLUMN upload_attempts INTEGER NOT NULL DEFAULT 0')
       this.logger.info('migrated: added upload_attempts column to objects')
     }
+  }
+
+  // ── Config / Identity ─────────────────────────────────────────────
+
+  /** Get a config value by key */
+  getConfig(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM config WHERE key = ?').get(key) as { value: string } | undefined
+    return row?.value
+  }
+
+  /** Set a config value */
+  setConfig(key: string, value: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)').run(key, value)
+  }
+
+  /**
+   * Validate that the wallet address matches the one stored in the database.
+   * On first startup, stores the address. On subsequent startups, verifies it matches.
+   * Throws if the address doesn't match — prevents accidental key changes.
+   */
+  validateWalletAddress(address: string): void {
+    const stored = this.getConfig('wallet_address')
+
+    if (!stored) {
+      // First startup — store the address
+      this.setConfig('wallet_address', address.toLowerCase())
+      this.logger.info({ address }, 'wallet address bound to this database')
+      return
+    }
+
+    if (stored.toLowerCase() !== address.toLowerCase()) {
+      throw new Error(
+        `Wallet address mismatch!\n` +
+          `  Database is bound to: ${stored}\n` +
+          `  Current PRIVATE_KEY:  ${address}\n\n` +
+          `All data sets and uploads are tied to the original wallet.\n` +
+          `Changing PRIVATE_KEY will break uploads, downloads, and deletions.\n` +
+          `If you intentionally want to reset, delete the database file and restart.`
+      )
+    }
+
+    this.logger.debug({ address }, 'wallet address verified')
   }
 
   // ── Bucket operations ─────────────────────────────────────────────
