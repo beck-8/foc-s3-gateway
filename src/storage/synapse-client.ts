@@ -178,11 +178,15 @@ export class SynapseClient {
     // but standard practice is Date.now() or similar.
     const clientDataSetId = BigInt(Date.now())
 
+    // Extract SP root URL from retrieval URL
+    // retrieval_url is like "https://host.com/piece/bafk..." but schedulePieceDeletion needs "https://host.com"
+    const spOrigin = new URL(options.serviceURL).origin
+
     await schedulePieceDeletion(synapse.client as any, {
       dataSetId: BigInt(options.dataSetId),
       pieceId: BigInt(options.pieceId),
       clientDataSetId,
-      serviceURL: options.serviceURL,
+      serviceURL: spOrigin,
     })
 
     this.logger.debug(

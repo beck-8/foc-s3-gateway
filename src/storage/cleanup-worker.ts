@@ -73,11 +73,23 @@ export class CleanupWorker {
           this.logger.info({ pieceCid: item.piece_cid, providerId: item.provider_id }, 'piece deletion completed')
           processedCount++
         } catch (error) {
-          this.metadataStore.incrementDeletionAttempt(item.id)
-          this.logger.warn(
-            { pieceCid: item.piece_cid, providerId: item.provider_id, attempt: item.attempts + 1, error },
-            'piece deletion failed, will retry'
-          )
+          // If the piece is already gone from the SP, treat it as success
+          const errorMsg = error instanceof Error ? error.message : String(error)
+          const details = (error as any)?.details ?? ''
+          if (errorMsg.includes('not found') || details.includes('not found')) {
+            this.metadataStore.removePendingDeletion(item.id)
+            this.logger.info(
+              { pieceCid: item.piece_cid, providerId: item.provider_id },
+              'piece already removed from SP, marking deletion complete'
+            )
+            processedCount++
+          } else {
+            this.metadataStore.incrementDeletionAttempt(item.id)
+            this.logger.warn(
+              { pieceCid: item.piece_cid, providerId: item.provider_id, attempt: item.attempts + 1, error },
+              'piece deletion failed, will retry'
+            )
+          }
         }
       }
     }
