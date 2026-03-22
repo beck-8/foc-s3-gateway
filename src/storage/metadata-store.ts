@@ -567,23 +567,69 @@ export class MetadataStore {
 
   /** Stage an object for async FOC upload (returns immediately, worker uploads later) */
   stageObject(bucket: string, key: string, size: number, contentType: string, etag: string, localPath: string): void {
-    this.db
-      .prepare(
-        `INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, status, local_path, upload_attempts, updated_at, deleted)
-         VALUES (?, ?, '', ?, ?, ?, 0, 'pending', ?, 0, datetime('now'), 0)
-         ON CONFLICT (bucket, key) DO UPDATE SET
-           piece_cid = '',
-           size = excluded.size,
-           content_type = excluded.content_type,
-           etag = excluded.etag,
-           copies_count = 0,
-           status = 'pending',
-           local_path = excluded.local_path,
-           upload_attempts = 0,
-           updated_at = datetime('now'),
-           deleted = 0`
-      )
-      .run(bucket, key, size, contentType, etag, localPath)
+    const transaction = this.db.transaction(() => {
+      // Check if an existing object has FOC copies that need cleanup
+      const existing = this.db
+        .prepare('SELECT piece_cid FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
+        .get(bucket, key) as { piece_cid: string } | undefined
+
+      if (existing?.piece_cid) {
+        const copies = this.db
+          .prepare(
+            'SELECT provider_id, data_set_id, piece_id, retrieval_url FROM object_copies WHERE bucket = ? AND key = ?'
+          )
+          .all(bucket, key) as Array<{
+          provider_id: string
+          data_set_id: string
+          piece_id: string
+          retrieval_url: string
+        }>
+
+        // Remove old copy records
+        this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, key)
+
+        // Check if any OTHER non-deleted object still references this piece_cid
+        const otherRef = this.db
+          .prepare('SELECT 1 FROM objects WHERE piece_cid = ? AND deleted = 0 AND NOT (bucket = ? AND key = ?) LIMIT 1')
+          .get(existing.piece_cid, bucket, key)
+
+        // No other references — queue copies for SP cleanup
+        if (!otherRef && copies.length > 0) {
+          const insertPending = this.db.prepare(`
+            INSERT INTO pending_deletions (piece_cid, piece_id, provider_id, data_set_id, retrieval_url)
+            VALUES (?, ?, ?, ?, ?)
+          `)
+          for (const copy of copies) {
+            insertPending.run(existing.piece_cid, copy.piece_id, copy.provider_id, copy.data_set_id, copy.retrieval_url)
+          }
+          this.logger.info(
+            { bucket, key, pieceCid: existing.piece_cid, pendingCount: copies.length },
+            'old copies queued for SP cleanup (overwrite)'
+          )
+        }
+      }
+
+      // Upsert the new object
+      this.db
+        .prepare(
+          `INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, status, local_path, upload_attempts, updated_at, deleted)
+           VALUES (?, ?, '', ?, ?, ?, 0, 'pending', ?, 0, datetime('now'), 0)
+           ON CONFLICT (bucket, key) DO UPDATE SET
+             piece_cid = '',
+             size = excluded.size,
+             content_type = excluded.content_type,
+             etag = excluded.etag,
+             copies_count = 0,
+             status = 'pending',
+             local_path = excluded.local_path,
+             upload_attempts = 0,
+             updated_at = datetime('now'),
+             deleted = 0`
+        )
+        .run(bucket, key, size, contentType, etag, localPath)
+    })
+
+    transaction()
     this.logger.debug({ bucket, key, size, localPath }, 'object staged for async upload')
   }
 
