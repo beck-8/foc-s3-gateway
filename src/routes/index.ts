@@ -280,15 +280,32 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const { bucket } = request.params as { bucket: string; '*': string }
     const key = (request.params as { '*': string })['*']
 
-    // Trailing-slash requests (GET /bucket/) have empty key — redirect to list objects
+    // Trailing-slash requests (GET /bucket/) have empty key — redirect to bucket-level GET
     if (!key) {
       const query = request.query as Record<string, string>
-      logger.debug({ bucket, query }, 'ListObjectsV2 (trailing slash)')
 
       if (!metadataStore.bucketExists(bucket)) {
         sendNoSuchBucket(reply, bucket)
         return
       }
+
+      // GetBucketLocation: GET /bucket/?location
+      if ('location' in query) {
+        logger.debug({ bucket }, 'GetBucketLocation (trailing slash)')
+        reply.header('Content-Type', 'application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`)
+        return
+      }
+
+      // GetBucketVersioning: GET /bucket/?versioning
+      if ('versioning' in query) {
+        logger.debug({ bucket }, 'GetBucketVersioning (trailing slash)')
+        reply.header('Content-Type', 'application/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`)
+        return
+      }
+
+      logger.debug({ bucket, query }, 'ListObjectsV2 (trailing slash)')
 
       const prefix = query['prefix'] ?? ''
       const delimiter = query['delimiter'] ?? ''
