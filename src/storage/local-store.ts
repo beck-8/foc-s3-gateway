@@ -219,22 +219,32 @@ export class LocalStore {
     let size = 0
     const out = createWriteStream(localPath)
 
-    await new Promise<void>((resolve, reject) => {
-      stream.on('data', (chunk: Buffer) => {
-        md5.update(chunk)
-        size += chunk.length
+    try {
+      await new Promise<void>((resolve, reject) => {
+        stream.on('data', (chunk: Buffer) => {
+          md5.update(chunk)
+          size += chunk.length
+        })
+        stream.pipe(out)
+        out.on('finish', resolve)
+        stream.on('error', (err) => {
+          out.destroy()
+          reject(err)
+        })
+        out.on('error', (err) => {
+          stream.destroy()
+          reject(err)
+        })
       })
-      stream.pipe(out)
-      out.on('finish', resolve)
-      stream.on('error', (err) => {
-        out.destroy()
-        reject(err)
-      })
-      out.on('error', (err) => {
-        stream.destroy()
-        reject(err)
-      })
-    })
+    } catch (error) {
+      // Clean up partial file immediately — don't leave orphans on disk
+      try {
+        unlinkSync(localPath)
+      } catch {
+        // File may not exist if write never started
+      }
+      throw error
+    }
 
     return { localPath, size, etag: md5.digest('hex') }
   }
