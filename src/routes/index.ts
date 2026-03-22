@@ -81,9 +81,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const stats = metadataStore.getUploadStats()
     const diskStats = localStore.getDiskStats()
     const multipartCount = metadataStore.countAllMultipartUploads()
+    const deletionStats = metadataStore.getDeletionStats()
 
     const result: Record<string, unknown> = {
       uploads: stats,
+      deletions: deletionStats,
       disk: {
         staging: {
           files: diskStats.staging.count,

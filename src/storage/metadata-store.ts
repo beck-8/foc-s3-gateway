@@ -492,6 +492,25 @@ export class MetadataStore {
       .run(id)
   }
 
+  /** Get deletion queue statistics for the status API */
+  getDeletionStats(): { pending: number; failed: number; total: number } {
+    const stats = this.db
+      .prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN attempts < 5 THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN attempts >= 5 THEN 1 ELSE 0 END) as failed
+      FROM pending_deletions
+    `)
+      .get() as { total: number; pending: number; failed: number }
+
+    return {
+      pending: stats.pending ?? 0,
+      failed: stats.failed ?? 0,
+      total: stats.total ?? 0,
+    }
+  }
+
   /**
    * Copy an object from one location to another (same or cross-bucket).
    * Both source and destination point to the same PieceCID — no data is re-uploaded.
