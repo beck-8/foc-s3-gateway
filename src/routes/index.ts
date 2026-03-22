@@ -38,8 +38,23 @@ export interface RouteContext {
 
 /** Minimum file size for FOC storage providers */
 const MIN_UPLOAD_SIZE = 127
-/** Maximum upload size (~1 GiB with fr32 expansion) */
+/** Maximum upload size (~1 GiB) */
 const MAX_UPLOAD_SIZE = 1_065_353_216
+
+/** Read XML body from request — handles cases where Content-Type isn't application/xml */
+async function readXmlBody(request: import('fastify').FastifyRequest): Promise<string> {
+  // If Fastify parsed the body (Content-Type matched xml parser), use it
+  if (typeof request.body === 'string' && request.body.length > 0) {
+    return request.body
+  }
+  // Otherwise read from raw stream (Content-Type didn't match, body was discarded)
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    request.raw.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.raw.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
+    request.raw.on('error', reject)
+  })
+}
 
 /** Format bytes to human-readable string (e.g. "1.5 GB") */
 function formatBytes(bytes: number): string {
@@ -362,15 +377,17 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     // ── DeleteObjects: POST /{bucket}?delete ─────────────────────────
     if ('delete' in query) {
-      logger.debug({ bucket }, 'DeleteObjects')
-
       // Parse XML body: <Delete><Object><Key>k</Key></Object>...</Delete>
-      const body = (request.body as string) ?? ''
+      const body = await readXmlBody(request)
+      logger.debug({ bucket, bodyLength: body.length, contentType: request.headers['content-type'] }, 'DeleteObjects')
+
       const keyMatches = body.match(/<Key>([^<]+)<\/Key>/g) ?? []
       const keys = keyMatches.map((m) => {
         const inner = m.replace(/<Key>/, '').replace(/<\/Key>/, '')
         return decodeURIComponent(inner)
       })
+
+      logger.debug({ bucket, keysToDelete: keys }, 'DeleteObjects parsed keys')
 
       const deleted: string[] = []
       for (const key of keys) {
@@ -404,8 +421,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return
       }
       if ('delete' in query) {
-        logger.debug({ bucket }, 'DeleteObjects (trailing slash)')
-        const body = (request.body as string) ?? ''
+        const body = await readXmlBody(request)
+        logger.debug({ bucket, bodyLength: body.length }, 'DeleteObjects (trailing slash)')
         const keyMatches = body.match(/<Key>([^<]+)<\/Key>/g) ?? []
         const keys = keyMatches.map((m) => {
           const inner = m.replace(/<Key>/, '').replace(/<\/Key>/, '')
