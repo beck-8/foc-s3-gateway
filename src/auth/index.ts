@@ -74,7 +74,19 @@ export function createAuthHook(options: AuthOptions) {
       }
 
       logger.warn({ url: request.url, method: request.method }, 'missing auth header')
-      sendAuthError(reply, request.url)
+      // Return 401 with WWW-Authenticate so WebDAV/browser clients can retry with credentials
+      reply
+        .status(401)
+        .header('WWW-Authenticate', 'Basic realm="FOC Gateway"')
+        .header('Content-Type', 'application/xml')
+        .send(
+          buildErrorXml({
+            code: 'AccessDenied',
+            message: 'Access Denied',
+            resource: request.url,
+            requestId: Math.random().toString(36).substring(2, 18).toUpperCase(),
+          }),
+        )
       return
     }
 
