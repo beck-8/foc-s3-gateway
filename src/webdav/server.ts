@@ -32,6 +32,10 @@ export async function createWebDavServer(options: WebDavServerOptions) {
         target: 'pino-pretty',
         options: { colorize: true },
       },
+      serializers: {
+        // Display responseTime in seconds instead of milliseconds (same as S3 server)
+        responseTime: (ms: number) => `${(ms / 1000).toFixed(2)}s`,
+      },
     },
     bodyLimit: 1024 * 1024 * 1024, // 1 GiB
   })
