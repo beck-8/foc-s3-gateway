@@ -2,7 +2,9 @@
 
 S3 + WebDAV gateway for [Filecoin Onchain Cloud (FOC)](https://github.com/FilOzone/synapse-sdk) — use **Rclone**, **AWS CLI**, or any file manager to read/write FOC storage.
 
-> Built for [FOC WG Hackathon #2](https://github.com/FilOzone)
+# Demo
+
+will be updated later
 
 ## What is this?
 
