@@ -46,6 +46,10 @@ describe('WebDAV Routes', () => {
     metadataStore = new MetadataStore({ dbPath: ':memory:', logger })
     localStore = new LocalStore({ dataDir: tempDir, logger })
 
+    // Reset mock call counts so each test starts clean
+    mockSynapse.upload.mockClear()
+    mockSynapse.download.mockClear()
+
     app = await createWebDavServer({
       port: 0,
       host: '127.0.0.1',
@@ -269,4 +273,218 @@ describe('WebDAV Routes', () => {
       expect(response.statusCode).toBe(204)
     })
   })
+
+  // ── HEAD ──────────────────────────────────────────────────────────────
+
+  describe('HEAD (file metadata)', () => {
+    it('returns headers for existing file', async () => {
+      metadataStore.putObject('default', 'info.txt', 'cid1', 512, 'text/plain', 'etag-info')
+
+      const response = await app.inject({ method: 'HEAD', url: '/default/info.txt' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['content-type']).toBe('text/plain')
+      expect(response.headers['content-length']).toBe('512')
+      expect(response.headers['etag']).toBe('"etag-info"')
+      // Note: Fastify auto-generates HEAD from GET via raw stream; body may not be empty
+      // in inject mode. The protocol-level guarantee is that real HTTP HEAD strips body.
+    })
+
+    it('returns 404 for non-existent file', async () => {
+      const response = await app.inject({ method: 'HEAD', url: '/default/phantom.txt' })
+      expect(response.statusCode).toBe(404)
+    })
+  })
+
+  // ── PROPFIND: additional scenarios ───────────────────────────────────
+
+  describe('PROPFIND (additional)', () => {
+    it('Depth:0 at bucket level returns only the bucket itself', async () => {
+      metadataStore.putObject('default', 'hidden.txt', 'cid', 10, 'text/plain', 'e')
+
+      const response = await app.inject({
+        method: 'PROPFIND',
+        url: '/default/',
+        headers: { depth: '0' },
+      })
+
+      expect(response.statusCode).toBe(207)
+      // Should mention the bucket
+      expect(response.body).toContain('default')
+      // Should NOT list child files at Depth:0
+      expect(response.body).not.toContain('hidden.txt')
+    })
+
+    it('lists virtual subdirectory when keys contain /', async () => {
+      metadataStore.putObject('default', 'photos/2025/img.jpg', 'c1', 100, 'image/jpeg', 'e1')
+      metadataStore.putObject('default', 'photos/2025/raw.cr2', 'c2', 200, 'image/x-canon-cr2', 'e2')
+
+      const response = await app.inject({
+        method: 'PROPFIND',
+        url: '/default/photos/',
+        headers: { depth: '1' },
+      })
+
+      expect(response.statusCode).toBe(207)
+      // Should show the virtual "2025/" subdirectory as a collection
+      expect(response.body).toContain('2025')
+    })
+  })
+
+  // ── MKCOL: key-level (stub) ──────────────────────────────────────────
+
+  describe('MKCOL (additional)', () => {
+    it('returns 201 for key-level MKCOL (stub — virtual subdirs)', async () => {
+      // Key-level MKCOL is a stub: we don't actually create directories in the DB,
+      // but return 201 to satisfy WebDAV clients that create intermediate folders.
+      const response = await app.inject({ method: 'MKCOL', url: '/default/subfolder' })
+      expect(response.statusCode).toBe(201)
+    })
+  })
+
+  // ── COPY: error cases ────────────────────────────────────────────────
+
+  describe('COPY (error cases)', () => {
+    it('returns 404 when source file does not exist', async () => {
+      const response = await app.inject({
+        method: 'COPY',
+        url: '/default/nonexistent.txt',
+        headers: { destination: 'http://localhost/default/copy.txt' },
+      })
+
+      expect(response.statusCode).toBe(404)
+    })
+  })
+
+  // ── MOVE: error cases ────────────────────────────────────────────────
+
+  describe('MOVE (error cases)', () => {
+    it('returns 404 when source file does not exist', async () => {
+      const response = await app.inject({
+        method: 'MOVE',
+        url: '/default/ghost.txt',
+        headers: { destination: 'http://localhost/default/moved.txt' },
+      })
+
+      expect(response.statusCode).toBe(404)
+    })
+  })
+
+  // ── DELETE: additional scenarios ─────────────────────────────────────
+
+  describe('DELETE (additional)', () => {
+    it('returns 409 when deleting non-empty bucket', async () => {
+      await app.inject({ method: 'MKCOL', url: '/photos' })
+      metadataStore.putObject('photos', 'img.jpg', 'cid', 100, 'image/jpeg', 'e')
+
+      const response = await app.inject({ method: 'DELETE', url: '/photos' })
+
+      expect(response.statusCode).toBe(409)
+    })
+
+    it('cleans up staging file when deleting a staged object', async () => {
+      const payload = 'x'.repeat(128)
+      await app.inject({
+        method: 'PUT',
+        url: '/default/staged.bin',
+        payload,
+        headers: { 'content-type': 'application/octet-stream' },
+      })
+
+      const localPath = metadataStore.getLocalPath('default', 'staged.bin')
+      expect(localPath).toBeDefined()
+      expect(localStore.exists(localPath!)).toBe(true)
+
+      await app.inject({ method: 'DELETE', url: '/default/staged.bin' })
+
+      expect(localStore.exists(localPath!)).toBe(false)
+    })
+  })
+
+  // ── PROPPATCH (stub) ─────────────────────────────────────────────────
+
+  describe('PROPPATCH (stub)', () => {
+    it('returns 207 multistatus', async () => {
+      const response = await app.inject({
+        method: 'PROPPATCH',
+        url: '/default/file.txt',
+        payload: '<D:propertyupdate xmlns:D="DAV:"><D:set><D:prop/></D:set></D:propertyupdate>',
+        headers: { 'content-type': 'application/xml' },
+      })
+
+      expect(response.statusCode).toBe(207)
+      expect(response.headers['content-type']).toContain('application/xml')
+      expect(response.body).toContain('<D:multistatus')
+    })
+  })
+
+  // ── PUT: root / bucket-level rejection ──────────────────────────────
+
+  describe('PUT (root / bucket-level rejection)', () => {
+    it('returns 409 when writing to root', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/',
+        payload: 'data',
+      })
+
+      expect(response.statusCode).toBe(409)
+    })
+
+    it('returns 409 when writing to bucket level (no key)', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/',
+        payload: 'data',
+      })
+
+      expect(response.statusCode).toBe(409)
+    })
+  })
+
+  // ── GET: 0-byte file ─────────────────────────────────────────────────
+
+  describe('GET (0-byte file)', () => {
+    it('returns 200 with empty body for a 0-byte object', async () => {
+      // Create a 0-byte object directly in the metadata store
+      metadataStore.putObject('default', 'empty.dat', '', 0, 'application/octet-stream', 'd41d8cd98f00b204e9800998ecf8427e')
+
+      // Reset mock so previous test calls don't bleed through
+      mockSynapse.download.mockClear()
+
+      const response = await app.inject({ method: 'GET', url: '/default/empty.dat' })
+
+      expect(response.statusCode).toBe(200)
+      expect(Number(response.headers['content-length'])).toBe(0)
+      expect(response.body).toBe('')
+      // Should NOT call synapse download for empty objects
+      expect(mockSynapse.download).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── GET: local-first ─────────────────────────────────────────────────
+
+  describe('GET (local-first)', () => {
+    it('serves staged file from local disk, not FOC', async () => {
+      const payload = 'x'.repeat(128)
+      // Stage via PUT
+      await app.inject({
+        method: 'PUT',
+        url: '/default/local.bin',
+        payload,
+        headers: { 'content-type': 'application/octet-stream' },
+      })
+
+      // Reset the mock to detect if download is called
+      mockSynapse.download.mockClear()
+
+      const response = await app.inject({ method: 'GET', url: '/default/local.bin' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toBe(payload)
+      // Synapse download must NOT have been called
+      expect(mockSynapse.download).not.toHaveBeenCalled()
+    })
+  })
 })
+

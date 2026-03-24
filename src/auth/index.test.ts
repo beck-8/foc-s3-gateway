@@ -17,6 +17,7 @@ describe('Auth Middleware', () => {
   beforeEach(async () => {
     app = Fastify({ logger: false })
 
+    // Default: S3 protocol (no protocol arg = 's3')
     const authHook = createAuthHook({ accessKey: TEST_AK, secretKey: TEST_SK, logger })
     app.addHook('preHandler', authHook)
 
@@ -61,7 +62,33 @@ describe('Auth Middleware', () => {
     it('rejects missing auth header', async () => {
       const response = await app.inject({ method: 'GET', url: '/test' })
 
+      // S3 protocol (default): missing header → 403 AccessDenied (AWS spec — S3 never returns 401)
       expect(response.statusCode).toBe(403)
+      expect(response.body).toContain('AccessDenied')
+    })
+  })
+
+  // ── WebDAV protocol: missing header returns 401 ──────────────────────
+
+  describe('WebDAV Auth — missing header (protocol: webdav)', () => {
+    let webdavApp: ReturnType<typeof Fastify>
+
+    beforeEach(async () => {
+      webdavApp = Fastify({ logger: false })
+      const authHook = createAuthHook({ accessKey: TEST_AK, secretKey: TEST_SK, protocol: 'webdav', logger })
+      webdavApp.addHook('preHandler', authHook)
+      webdavApp.get('/files/doc.txt', async () => 'content')
+    })
+
+    afterEach(async () => {
+      await webdavApp.close()
+    })
+
+    it('returns 401+WWW-Authenticate when auth header is missing', async () => {
+      const response = await webdavApp.inject({ method: 'GET', url: '/files/doc.txt' })
+
+      expect(response.statusCode).toBe(401)
+      expect(response.headers['www-authenticate']).toContain('Basic')
     })
   })
 

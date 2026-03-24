@@ -14,6 +14,8 @@ export interface AuthOptions {
   accessKey: string
   secretKey: string
   logger: Logger
+  /** 'webdav' returns 401+WWW-Authenticate on missing header; 's3' (default) always returns 403 */
+  protocol?: 's3' | 'webdav'
 }
 
 /**
@@ -74,19 +76,25 @@ export function createAuthHook(options: AuthOptions) {
       }
 
       logger.warn({ url: request.url, method: request.method }, 'missing auth header')
-      // Return 401 with WWW-Authenticate so WebDAV/browser clients can retry with credentials
-      reply
-        .status(401)
-        .header('WWW-Authenticate', 'Basic realm="FOC Gateway"')
-        .header('Content-Type', 'application/xml')
-        .send(
-          buildErrorXml({
-            code: 'AccessDenied',
-            message: 'Access Denied',
-            resource: request.url,
-            requestId: Math.random().toString(36).substring(2, 18).toUpperCase(),
-          }),
-        )
+
+      if (options.protocol === 'webdav') {
+        // WebDAV / browser clients: 401 + WWW-Authenticate triggers credential dialog
+        reply
+          .status(401)
+          .header('WWW-Authenticate', 'Basic realm="FOC Gateway"')
+          .header('Content-Type', 'application/xml')
+          .send(
+            buildErrorXml({
+              code: 'AccessDenied',
+              message: 'Access Denied',
+              resource: request.url,
+              requestId: Math.random().toString(36).substring(2, 18).toUpperCase(),
+            }),
+          )
+      } else {
+        // S3 clients: always 403 (AWS spec — S3 never returns 401)
+        sendAuthError(reply, request.url)
+      }
       return
     }
 

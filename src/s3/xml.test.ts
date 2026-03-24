@@ -55,6 +55,15 @@ describe('buildListBucketsXml', () => {
     expect(xml).toContain('&amp;')
     expect(xml).not.toContain('<>')
   })
+
+  it('converts SQLite datetime format to ISO 8601 in CreationDate', () => {
+    // SQLite stores dates as "YYYY-MM-DD HH:mm:ss" — this was the root cause of mc parse failures
+    const xml = buildListBucketsXml([{ name: 'myb', creationDate: '2026-03-21 13:57:52' }], 'owner')
+
+    // Must contain a proper ISO 8601 string with 'T' separator, not the SQLite space-separated format
+    expect(xml).toContain('2026-03-21T13:57:52.000Z')
+    expect(xml).not.toContain('2026-03-21 13:57:52')
+  })
 })
 
 describe('buildListObjectsV2Xml', () => {

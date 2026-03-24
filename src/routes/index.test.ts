@@ -232,6 +232,52 @@ describe('S3 Routes', () => {
 
       expect(response.statusCode).toBe(404)
     })
+
+    it('GetBucketLocation returns us-east-1', async () => {
+      const response = await app.inject({ method: 'GET', url: '/default?location' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['content-type']).toContain('application/xml')
+      expect(response.body).toContain('<LocationConstraint')
+      expect(response.body).toContain('us-east-1')
+    })
+
+    it('GetBucketVersioning returns empty config', async () => {
+      const response = await app.inject({ method: 'GET', url: '/default?versioning' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['content-type']).toContain('application/xml')
+      expect(response.body).toContain('<VersioningConfiguration')
+    })
+
+    it('GetBucketLocation with trailing slash', async () => {
+      const response = await app.inject({ method: 'GET', url: '/default/?location' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('us-east-1')
+    })
+
+    it('paginates with continuation-token', async () => {
+      metadataStore.putObject('default', 'a.txt', 'c1', 10, 'text/plain', 'e1')
+      metadataStore.putObject('default', 'b.txt', 'c2', 20, 'text/plain', 'e2')
+      metadataStore.putObject('default', 'c.txt', 'c3', 30, 'text/plain', 'e3')
+
+      // First page: max-keys=2 → should be truncated
+      const page1 = await app.inject({ method: 'GET', url: '/default?max-keys=2' })
+      expect(page1.statusCode).toBe(200)
+      expect(page1.body).toContain('<IsTruncated>true</IsTruncated>')
+      expect(page1.body).toContain('<NextContinuationToken>')
+
+      const tokenMatch = page1.body.match(/<NextContinuationToken>(.*?)<\/NextContinuationToken>/)
+      expect(tokenMatch).toBeTruthy()
+      const token = tokenMatch![1]
+
+      // Second page: using continuation-token
+      const page2 = await app.inject({ method: 'GET', url: `/default?max-keys=2&continuation-token=${token}` })
+      expect(page2.statusCode).toBe(200)
+      expect(page2.body).toContain('<IsTruncated>false</IsTruncated>')
+      expect(page2.body).toContain('<Key>c.txt</Key>')
+    })
   })
 
   // ── PutObject: PUT /{bucket}/{key} ──────────────────────────────────
@@ -284,6 +330,34 @@ describe('S3 Routes', () => {
 
       expect(response.statusCode).toBe(400)
       expect(response.body).toContain('EntityTooSmall')
+    })
+
+    it('accepts empty file (0 bytes)', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/empty.txt',
+        payload: '',
+        headers: { 'content-type': 'text/plain', 'content-length': '0' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['etag']).toBeDefined()
+
+      const obj = metadataStore.getObject('default', 'empty.txt')
+      expect(obj).toBeDefined()
+      expect(obj?.size).toBe(0)
+    })
+
+    it('rejects files larger than ~1 GiB (EntityTooLarge)', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/huge.bin',
+        payload: '',
+        headers: { 'content-length': '1065353217' }, // 1 GiB + 1 byte
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toContain('EntityTooLarge')
     })
   })
 
@@ -344,6 +418,22 @@ describe('S3 Routes', () => {
 
       expect(mockSynapse.upload).not.toHaveBeenCalled()
     })
+
+    it('overwrites existing destination object', async () => {
+      metadataStore.putObject('default', 'src.txt', 'cid-src', 100, 'text/plain', 'etag-src')
+      metadataStore.putObject('default', 'dst.txt', 'cid-old', 50, 'text/plain', 'etag-old')
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/dst.txt',
+        headers: { 'x-amz-copy-source': '/default/src.txt' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('<CopyObjectResult>')
+      // Destination now points to same pieceCid as source
+      expect(metadataStore.getObject('default', 'dst.txt')?.pieceCid).toBe('cid-src')
+    })
   })
 
   // ── GetObject: GET /{bucket}/{key} ──────────────────────────────────
@@ -394,6 +484,24 @@ describe('S3 Routes', () => {
       const response = await app.inject({ method: 'GET', url: '/default/broken.txt' })
 
       expect(response.statusCode).toBe(500)
+    })
+
+    it('returns empty body for 0-byte object', async () => {
+      // Put an empty object first
+      await app.inject({
+        method: 'PUT',
+        url: '/default/empty.txt',
+        payload: '',
+        headers: { 'content-type': 'text/plain', 'content-length': '0' },
+      })
+
+      const response = await app.inject({ method: 'GET', url: '/default/empty.txt' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['content-length']).toBe('0')
+      expect(response.body).toBe('')
+      // Should NOT call synapse download for empty objects
+      expect(mockSynapse.download).not.toHaveBeenCalled()
     })
   })
 
@@ -467,6 +575,60 @@ describe('S3 Routes', () => {
 
       // Local file should be gone
       expect(localStore.exists(localPath!)).toBe(false)
+    })
+  })
+
+  // ── DeleteObjects: POST /{bucket}?delete ────────────────────────────
+  //    Batch delete — used by `mc rm --recursive`
+
+  describe('POST /:bucket?delete (DeleteObjects)', () => {
+    it('deletes multiple objects and returns XML result', async () => {
+      metadataStore.putObject('default', 'a.txt', 'cid1', 10, 'text/plain', 'e1')
+      metadataStore.putObject('default', 'b.txt', 'cid2', 20, 'text/plain', 'e2')
+
+      const body = '<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>'
+      const response = await app.inject({
+        method: 'POST',
+        url: '/default?delete',
+        payload: body,
+        headers: { 'content-type': 'application/xml' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['content-type']).toContain('application/xml')
+      expect(response.body).toContain('<DeleteResult')
+      expect(response.body).toContain('<Deleted><Key>a.txt</Key></Deleted>')
+      expect(response.body).toContain('<Deleted><Key>b.txt</Key></Deleted>')
+
+      expect(metadataStore.getObject('default', 'a.txt')).toBeUndefined()
+      expect(metadataStore.getObject('default', 'b.txt')).toBeUndefined()
+    })
+
+    it('returns empty DeleteResult when keys do not exist (idempotent)', async () => {
+      const body = '<Delete><Object><Key>ghost.txt</Key></Object></Delete>'
+      const response = await app.inject({
+        method: 'POST',
+        url: '/default?delete',
+        payload: body,
+        headers: { 'content-type': 'application/xml' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('<DeleteResult')
+      // ghost.txt is "deleted" (idempotent) with no error
+      expect(response.body).toContain('<Deleted><Key>ghost.txt</Key></Deleted>')
+    })
+
+    it('returns 404 for non-existent bucket', async () => {
+      const body = '<Delete><Object><Key>a.txt</Key></Object></Delete>'
+      const response = await app.inject({
+        method: 'POST',
+        url: '/nonexistent?delete',
+        payload: body,
+        headers: { 'content-type': 'application/xml' },
+      })
+
+      expect(response.statusCode).toBe(404)
     })
   })
 

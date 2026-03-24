@@ -112,6 +112,18 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         return
       }
 
+      // Empty files (0B, no pieceCid) — return empty body with correct headers
+      if (!obj.pieceCid || obj.size === 0) {
+        reply.raw.writeHead(200, {
+          'Content-Type': obj.contentType,
+          'Content-Length': 0,
+          ETag: `"${obj.etag}"`,
+          'Last-Modified': new Date(obj.lastModified).toUTCString(),
+        })
+        reply.raw.end()
+        return
+      }
+
       // Fall back to FOC download
       const copies = metadataStore.getObjectCopies(bucket, key)
       const { stream } = await synapseClient.download(obj.pieceCid, copies)

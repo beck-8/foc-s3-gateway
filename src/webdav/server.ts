@@ -60,6 +60,7 @@ export async function createWebDavServer(options: WebDavServerOptions) {
     const authHook = createAuthHook({
       accessKey: options.accessKey,
       secretKey: options.secretKey,
+      protocol: 'webdav',
       logger: app.log as Logger,
     })
     app.addHook('preHandler', authHook)
