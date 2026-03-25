@@ -123,6 +123,7 @@ export class MetadataStore {
       CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_objects_piece_cid ON objects(piece_cid);
       CREATE INDEX IF NOT EXISTS idx_copies_piece ON object_copies(bucket, key);
+      CREATE INDEX IF NOT EXISTS idx_copies_last_checked ON object_copies(last_checked_at, bucket, key);
       CREATE INDEX IF NOT EXISTS idx_pending_piece_cid ON pending_deletions(piece_cid);
       CREATE INDEX IF NOT EXISTS idx_multipart_bucket ON multipart_uploads(bucket, key);
     `)
@@ -1015,8 +1016,6 @@ export class MetadataStore {
     totalBytes: number
     emptyFiles: number
     eligibleFiles: number
-    compliantFiles: number
-    nonCompliantFiles: number
   } {
     const row = this.db
       .prepare(
@@ -1024,15 +1023,8 @@ export class MetadataStore {
            COUNT(*) as totalFiles,
            COALESCE(SUM(o.size), 0) as totalBytes,
            SUM(CASE WHEN o.size = 0 THEN 1 ELSE 0 END) as emptyFiles,
-           SUM(CASE WHEN o.piece_cid != '' THEN 1 ELSE 0 END) as eligibleFiles,
-           SUM(CASE WHEN o.piece_cid != '' AND COALESCE(h.healthy_count, 0) >= o.desired_copies THEN 1 ELSE 0 END) as compliantFiles,
-           SUM(CASE WHEN o.piece_cid != '' AND COALESCE(h.healthy_count, 0) < o.desired_copies THEN 1 ELSE 0 END) as nonCompliantFiles
+           SUM(CASE WHEN o.piece_cid != '' THEN 1 ELSE 0 END) as eligibleFiles
          FROM objects o
-         LEFT JOIN (
-           SELECT bucket, key, SUM(CASE WHEN health_status = 'healthy' THEN 1 ELSE 0 END) as healthy_count
-           FROM object_copies
-           GROUP BY bucket, key
-         ) h ON h.bucket = o.bucket AND h.key = o.key
          WHERE o.deleted = 0`
       )
       .get() as {
@@ -1040,8 +1032,6 @@ export class MetadataStore {
       totalBytes: number
       emptyFiles: number | null
       eligibleFiles: number | null
-      compliantFiles: number | null
-      nonCompliantFiles: number | null
     }
 
     return {
@@ -1049,8 +1039,6 @@ export class MetadataStore {
       totalBytes: row.totalBytes,
       emptyFiles: row.emptyFiles ?? 0,
       eligibleFiles: row.eligibleFiles ?? 0,
-      compliantFiles: row.compliantFiles ?? 0,
-      nonCompliantFiles: row.nonCompliantFiles ?? 0,
     }
   }
 
