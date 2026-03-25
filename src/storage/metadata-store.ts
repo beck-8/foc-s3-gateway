@@ -870,16 +870,66 @@ export class MetadataStore {
   }
 
   /** Complete an async upload: set pieceCid, copies, clear local_path */
-  completeUpload(bucket: string, key: string, pieceCid: string, copies?: CopyInfo[]): void {
+  completeUpload(bucket: string, key: string, pieceCid: string, copies?: CopyInfo[], localPath?: string): void {
     const copiesCount = copies?.length ?? 0
 
     const transaction = this.db.transaction(() => {
-      this.db
+      const result = this.db
         .prepare(
           `UPDATE objects SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, updated_at = datetime('now')
            WHERE bucket = ? AND key = ? AND deleted = 0`
         )
         .run(pieceCid, copiesCount, bucket, key)
+
+      // Race condition: object was renamed or deleted during upload.
+      // Find the new owner by local_path (copyObject transfers local_path to the destination).
+      if (result.changes === 0 && localPath) {
+        const newOwner = this.db
+          .prepare('SELECT bucket, key FROM objects WHERE local_path = ? AND deleted = 0 LIMIT 1')
+          .get(localPath) as { bucket: string; key: string } | undefined
+
+        if (newOwner) {
+          this.logger.info(
+            { originalBucket: bucket, originalKey: key, newBucket: newOwner.bucket, newKey: newOwner.key, pieceCid },
+            'object was renamed during upload, transferring pieceCid to new key'
+          )
+          this.db
+            .prepare(
+              `UPDATE objects SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, updated_at = datetime('now')
+               WHERE bucket = ? AND key = ? AND deleted = 0`
+            )
+            .run(pieceCid, copiesCount, newOwner.bucket, newOwner.key)
+
+          // Insert copies under the new key
+          if (copies && copies.length > 0) {
+            this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(newOwner.bucket, newOwner.key)
+            const insertCopy = this.db.prepare(
+              `INSERT INTO object_copies (
+                 bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role, health_status, consecutive_failures, last_checked_at, last_success_at
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'healthy', 0, datetime('now'), datetime('now'))`
+            )
+            for (const copy of copies) {
+              insertCopy.run(
+                newOwner.bucket,
+                newOwner.key,
+                copy.providerId,
+                copy.dataSetId,
+                copy.pieceId,
+                copy.retrievalUrl,
+                copy.role
+              )
+            }
+          }
+          return
+        }
+
+        this.logger.warn(
+          { bucket, key, pieceCid, localPath },
+          'upload completed but object was deleted and no renamed target found'
+        )
+        return
+      }
 
       if (copies && copies.length > 0) {
         this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, key)
@@ -904,13 +954,60 @@ export class MetadataStore {
     const copiesCount = copies.length
 
     const transaction = this.db.transaction(() => {
-      this.db
+      const result = this.db
         .prepare(
           `UPDATE objects
            SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = ?, updated_at = datetime('now')
            WHERE bucket = ? AND key = ? AND deleted = 0`
         )
         .run(pieceCid, copiesCount, localPath ?? null, bucket, key)
+
+      // Race condition: object was renamed or deleted during upload (same as completeUpload)
+      if (result.changes === 0 && localPath) {
+        const newOwner = this.db
+          .prepare('SELECT bucket, key FROM objects WHERE local_path = ? AND deleted = 0 LIMIT 1')
+          .get(localPath) as { bucket: string; key: string } | undefined
+
+        if (newOwner) {
+          this.logger.info(
+            { originalBucket: bucket, originalKey: key, newBucket: newOwner.bucket, newKey: newOwner.key, pieceCid },
+            'object was renamed during partial upload, transferring pieceCid to new key'
+          )
+          this.db
+            .prepare(
+              `UPDATE objects
+               SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = ?, updated_at = datetime('now')
+               WHERE bucket = ? AND key = ? AND deleted = 0`
+            )
+            .run(pieceCid, copiesCount, localPath ?? null, newOwner.bucket, newOwner.key)
+
+          this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(newOwner.bucket, newOwner.key)
+          const insertCopy = this.db.prepare(
+            `INSERT INTO object_copies (
+               bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role, health_status, consecutive_failures, last_checked_at, last_success_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'healthy', 0, datetime('now'), datetime('now'))`
+          )
+          for (const copy of copies) {
+            insertCopy.run(
+              newOwner.bucket,
+              newOwner.key,
+              copy.providerId,
+              copy.dataSetId,
+              copy.pieceId,
+              copy.retrievalUrl,
+              copy.role
+            )
+          }
+          return
+        }
+
+        this.logger.warn(
+          { bucket, key, pieceCid, localPath },
+          'partial upload completed but object was deleted and no renamed target found'
+        )
+        return
+      }
 
       this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, key)
       const insertCopy = this.db.prepare(

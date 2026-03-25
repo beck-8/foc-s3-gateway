@@ -188,6 +188,52 @@ describe('MetadataStore', () => {
     })
   })
 
+  // ── completeUpload race condition ──────────────────────────────────
+
+  describe('completeUpload with rename during upload', () => {
+    const testCopiesForUpload = [
+      {
+        providerId: '42',
+        dataSetId: '100',
+        pieceId: '1000',
+        retrievalUrl: 'https://sp1.example.com/piece/baga-race',
+        role: 'primary' as const,
+      },
+    ]
+
+    it('transfers pieceCid to renamed object when original key is deleted', () => {
+      // Stage and start uploading
+      store.stageObject('default', 'original.mov', 1000, 'video/quicktime', 'etag-o', '/tmp/staging/race1')
+      store.markUploading('default', 'original.mov')
+
+      // User renames during upload: copy + delete
+      store.copyObject('default', 'original.mov', 'default', 'renamed.mov')
+      store.deleteObject('default', 'original.mov')
+
+      // UploadWorker completes — original key is deleted, so pass localPath to find new owner
+      store.completeUpload('default', 'original.mov', 'baga-race', testCopiesForUpload, '/tmp/staging/race1')
+
+      // renamed.mov should now have the pieceCid
+      const obj = store.getObject('default', 'renamed.mov')
+      expect(obj?.pieceCid).toBe('baga-race')
+
+      const copies = store.getObjectCopies('default', 'renamed.mov')
+      expect(copies).toHaveLength(1)
+      expect(copies[0]?.providerId).toBe('42')
+    })
+
+    it('does not crash when object is fully deleted with no rename target', () => {
+      store.stageObject('default', 'doomed.bin', 256, 'application/octet-stream', 'etag-d', '/tmp/staging/doomed')
+      store.markUploading('default', 'doomed.bin')
+      store.deleteObject('default', 'doomed.bin')
+
+      // Should not throw — just logs a warning
+      expect(() => {
+        store.completeUpload('default', 'doomed.bin', 'baga-gone', testCopiesForUpload, '/tmp/staging/doomed')
+      }).not.toThrow()
+    })
+  })
+
   // ── Object copies ───────────────────────────────────────────────────
 
   describe('putObject with copies / getObjectCopies', () => {

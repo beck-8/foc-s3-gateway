@@ -182,7 +182,7 @@ export class UploadWorker {
       const result = await this.synapseClient.upload(webStream, { copies: desiredCopies })
 
       if (result.copies.length < desiredCopies) {
-        this.metadataStore.recordPartialUpload(bucket, key, result.pieceCid, result.copies)
+        this.metadataStore.recordPartialUpload(bucket, key, result.pieceCid, result.copies, localPath)
         this.localStore.delete(localPath)
         this.logger.warn(
           { bucket, key, pieceCid: result.pieceCid, desiredCopies, actualCopies: result.copies.length },
@@ -192,7 +192,7 @@ export class UploadWorker {
       }
 
       // Success: update metadata and remove local file
-      this.metadataStore.completeUpload(bucket, key, result.pieceCid, result.copies)
+      this.metadataStore.completeUpload(bucket, key, result.pieceCid, result.copies, localPath)
       this.localStore.delete(localPath)
 
       this.logger.info(

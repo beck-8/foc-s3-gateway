@@ -57,7 +57,7 @@ describe('UploadWorker desired copies handling', () => {
     expect(metadataStore.markUploading).toHaveBeenCalledOnce()
     expect(synapseClient.upload).toHaveBeenCalledTimes(1)
     expect(synapseClient.upload.mock.calls[0]?.[1]).toEqual({ copies: 2 })
-    expect(metadataStore.recordPartialUpload).toHaveBeenCalledWith('default', 'a.bin', 'cid-1', expect.any(Array))
+    expect(metadataStore.recordPartialUpload).toHaveBeenCalledWith('default', 'a.bin', 'cid-1', expect.any(Array), '/tmp/a')
     expect(metadataStore.markUploadFailed).not.toHaveBeenCalled()
     expect(metadataStore.completeUpload).not.toHaveBeenCalled()
     expect(localStore.delete).toHaveBeenCalledWith('/tmp/a')
