@@ -161,6 +161,9 @@ export async function createServer(options: ServerOptions) {
   // Register S3 routes
   registerRoutes(app, { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, logger })
 
+  // Reset objects stuck in 'uploading' state from a previous server run
+  metadataStore.resetStuckUploads()
+
   // Clean up orphaned staging files on startup
   const knownPaths = metadataStore.getAllLocalPaths()
   localStore.cleanupOrphans(knownPaths)

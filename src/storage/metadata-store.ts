@@ -1178,6 +1178,25 @@ export class MetadataStore {
       .run(bucket, key)
   }
 
+  /**
+   * Reset stuck 'uploading' objects back to 'pending' on server startup.
+   * When the server restarts mid-upload, these objects get stuck because
+   * getPendingUploads() only queries 'pending' and 'failed' status.
+   * Returns the number of objects reset.
+   */
+  resetStuckUploads(): number {
+    const result = this.db
+      .prepare(
+        `UPDATE objects SET status = 'pending', updated_at = datetime('now')
+         WHERE status = 'uploading' AND deleted = 0`
+      )
+      .run()
+    if (result.changes > 0) {
+      this.logger.info({ count: result.changes }, 'reset stuck uploading objects to pending')
+    }
+    return result.changes
+  }
+
   /** Get the local path for an object (if it's still staged on disk) */
   getLocalPath(bucket: string, key: string): string | undefined {
     const row = this.db

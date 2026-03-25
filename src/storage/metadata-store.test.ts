@@ -158,6 +158,36 @@ describe('MetadataStore', () => {
     })
   })
 
+  // ── resetStuckUploads ──────────────────────────────────────────────
+
+  describe('resetStuckUploads', () => {
+    it('resets uploading objects back to pending', () => {
+      store.stageObject('default', 'stuck.bin', 256, 'application/octet-stream', 'etag-s', '/tmp/stuck')
+      store.markUploading('default', 'stuck.bin')
+
+      // Verify it's uploading and NOT in pending uploads
+      expect(store.getPendingUploads(10).some((p) => p.key === 'stuck.bin')).toBe(false)
+
+      const count = store.resetStuckUploads()
+
+      expect(count).toBe(1)
+      expect(store.getPendingUploads(10).some((p) => p.key === 'stuck.bin')).toBe(true)
+    })
+
+    it('does not affect pending, failed, or uploaded objects', () => {
+      store.stageObject('default', 'p.bin', 256, 'application/octet-stream', 'etag-p', '/tmp/p')
+      store.putObject('default', 'u.bin', 'cid', 256, 'application/octet-stream', 'etag-u')
+
+      const count = store.resetStuckUploads()
+
+      expect(count).toBe(0)
+    })
+
+    it('returns 0 when no stuck uploads exist', () => {
+      expect(store.resetStuckUploads()).toBe(0)
+    })
+  })
+
   // ── Object copies ───────────────────────────────────────────────────
 
   describe('putObject with copies / getObjectCopies', () => {
