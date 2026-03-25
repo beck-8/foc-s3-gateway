@@ -173,8 +173,10 @@ curl http://localhost:8333/_/status?detail=true
   "objects": { "totalFiles": 120, "totalBytes": 734003200, "totalSize": "700 MB" },
   "replication": {
     "eligibleFiles": 118,
-    "compliantFiles": 115,
-    "nonCompliantFiles": 3,
+    "healthyFiles": 115,
+    "suspectFiles": 2,
+    "unhealthyFiles": 1,
+    "failedFiles": 0,
     "emptyFiles": 2,
     "repairingFiles": 1,
     "coolingDownFiles": 1
@@ -198,6 +200,12 @@ curl http://localhost:8333/_/status?detail=true
   "multipartUploads": 0
 }
 ```
+
+Replication file states:
+- `healthyFiles`: healthy copies meet `desiredCopies`
+- `suspectFiles`: still meets `desiredCopies`, but has at least one suspect copy
+- `unhealthyFiles`: has at least one healthy copy, but healthy copies are below `desiredCopies`
+- `failedFiles`: no healthy copies available
 
 With `?detail=true`, each pending/uploading/failed object is listed with `bucket`, `key`, `size`, `sizeFormatted`, `uploadAttempts`, and `updatedAt`.
 
