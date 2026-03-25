@@ -7,6 +7,7 @@
 
 import { calibration, mainnet } from '@filoz/synapse-core/chains'
 import { Synapse } from '@filoz/synapse-sdk'
+import { WarmStorageService } from '@filoz/synapse-sdk/warm-storage'
 import type { Logger } from 'pino'
 import { createWalletClient, type Hex, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -36,6 +37,7 @@ export interface UploadResult {
 
 export class SynapseClient {
   private synapse: Synapse | undefined
+  private warmStorageService: WarmStorageService | undefined
   private readonly privateKey: string
   private readonly rpcUrl: string | undefined
   private readonly network: string
@@ -68,6 +70,13 @@ export class SynapseClient {
 
     this.logger.info({ address: account.address, network: this.network }, 'synapse SDK initialized')
     return this.synapse
+  }
+
+  private getWarmStorageService(): WarmStorageService {
+    if (this.warmStorageService) return this.warmStorageService
+    const synapse = this.getSynapse()
+    this.warmStorageService = new WarmStorageService({ client: synapse.client as any })
+    return this.warmStorageService
   }
 
   async upload(data: Uint8Array | ReadableStream<Uint8Array>): Promise<UploadResult> {
@@ -168,23 +177,28 @@ export class SynapseClient {
    */
   async deletePiece(options: { dataSetId: string; pieceId: string; serviceURL: string }): Promise<void> {
     const synapse = this.getSynapse()
+    const warmStorageService = this.getWarmStorageService()
 
     // We need to use the synapse-core low-level schedulePieceDeletion
     // But since it's not exported from the main sdk right now, we can use the inner components
     // Actually, Synapse SDK might expose it or we can import it from synapse-core
     const { schedulePieceDeletion } = await import('@filoz/synapse-core/sp')
 
-    // For clientDataSetId, we need a unique nonce per data set. Usually 1n is fine if we only delete once,
-    // but standard practice is Date.now() or similar.
-    const clientDataSetId = BigInt(Date.now())
+    const dataSetId = BigInt(options.dataSetId)
+    const pieceId = BigInt(options.pieceId)
+    const dataSetInfo = await warmStorageService.getDataSet({ dataSetId })
+    if (!dataSetInfo) {
+      throw new Error(`Data set not found for deletion: ${options.dataSetId}`)
+    }
+    const clientDataSetId = dataSetInfo.clientDataSetId
 
     // Extract SP root URL from retrieval URL
     // retrieval_url is like "https://host.com/piece/bafk..." but schedulePieceDeletion needs "https://host.com"
     const spOrigin = new URL(options.serviceURL).origin
 
     await schedulePieceDeletion(synapse.client as any, {
-      dataSetId: BigInt(options.dataSetId),
-      pieceId: BigInt(options.pieceId),
+      dataSetId,
+      pieceId,
       clientDataSetId,
       serviceURL: spOrigin,
     })
@@ -193,6 +207,9 @@ export class SynapseClient {
       {
         dataSetId: options.dataSetId,
         pieceId: options.pieceId,
+        clientDataSetId: clientDataSetId.toString(),
+        signer: synapse.client.account.address,
+        payer: dataSetInfo.payer,
       },
       'piece deletion scheduled on SP'
     )
