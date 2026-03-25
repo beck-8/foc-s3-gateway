@@ -27,6 +27,8 @@ import {
 } from '../s3/xml.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
+import type { ProbeWorker } from '../storage/probe-worker.js'
+import type { RepairWorker } from '../storage/repair-worker.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
 import type { UploadWorker } from '../storage/upload-worker.js'
 
@@ -35,6 +37,8 @@ export interface RouteContext {
   synapseClient: SynapseClient
   localStore: LocalStore
   uploadWorker?: UploadWorker | undefined
+  probeWorker?: ProbeWorker | undefined
+  repairWorker?: RepairWorker | undefined
   logger: Logger
 }
 
@@ -111,7 +115,7 @@ function parseCopySource(copySource: string): { bucket: string; key: string } | 
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
-  const { metadataStore, synapseClient, localStore, uploadWorker, logger } = ctx
+  const { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, logger } = ctx
 
   // ── Upload status: GET /_/status ────────────────────────────────────
   //    Not an S3 API — gateway-specific endpoint for monitoring upload queue.
@@ -123,7 +127,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const deletionStats = metadataStore.getDeletionStats()
     const objectSummary = metadataStore.getObjectSummary()
     const copyHealth = metadataStore.getCopyHealthSummary()
-    const repairStatus = uploadWorker?.getRepairStatus()
+    const uploadStatus = uploadWorker?.getStatus()
+    const probeStatus = probeWorker?.getStatus()
+    const repairStatus = repairWorker?.getStatus()
 
     const result: Record<string, unknown> = {
       objects: {
@@ -158,6 +164,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       multipartUploads: multipartCount,
     }
 
+    if (uploadStatus) {
+      result.uploadWorker = uploadStatus
+    }
+    if (probeStatus) {
+      result.probe = probeStatus
+    }
     if (repairStatus) {
       result.repair = repairStatus
     }

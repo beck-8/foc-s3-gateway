@@ -1,16 +1,4 @@
-/**
- * Background upload worker — picks up staged objects and uploads to FOC.
- *
- * Concurrency: runs up to `concurrency` uploads in parallel (default: 10).
- *
- * Failure handling:
- *   - Each failed upload increments `upload_attempts` counter
- *   - Objects with < 10 attempts are retried on next cycle
- *   - After 10 failures the object stays as `failed` and is no longer picked up
- *   - Local file is preserved for failed uploads (data is not lost)
- *
- * On success: updates metadata with pieceCid/copies + deletes local file.
- */
+/** Background upload worker — only handles staged object uploads. */
 
 import type { Logger } from 'pino'
 import type { LocalStore } from './local-store.js'
@@ -26,14 +14,6 @@ export interface UploadWorkerOptions {
   intervalMs?: number
   /** Maximum number of concurrent uploads (default: 10) */
   concurrency?: number
-  /** Cooldown before retrying incomplete copy repair (default: 300000 = 5m) */
-  repairCooldownMs?: number
-  /** Minimum interval between copy health probes (default: 3600000 = 1h) */
-  probeIntervalMs?: number
-  /** Timeout for a single copy health probe (default: 8000 = 8s) */
-  probeTimeoutMs?: number
-  /** Consecutive probe failures required before marking a copy unhealthy (default: 24) */
-  unhealthyFailureThreshold?: number
 }
 
 interface PendingItem {
@@ -43,15 +23,6 @@ interface PendingItem {
   contentType: string
   localPath: string
   desiredCopies: number
-}
-
-interface RepairItem {
-  bucket: string
-  key: string
-  pieceCid: string
-  desiredCopies: number
-  copiesCount: number
-  healthyCopies: number
 }
 
 export class UploadWorker {
@@ -64,13 +35,6 @@ export class UploadWorker {
   private timer: ReturnType<typeof setTimeout> | undefined
   private running = false
   private activeCount = 0
-  private activeRepairCount = 0
-  private activeProbeCount = 0
-  private readonly repairCooldownMs: number
-  private readonly probeIntervalMs: number
-  private readonly probeTimeoutMs: number
-  private readonly unhealthyFailureThreshold: number
-  private readonly repairRetryAfter = new Map<string, number>()
 
   constructor(options: UploadWorkerOptions) {
     this.metadataStore = options.metadataStore
@@ -79,15 +43,17 @@ export class UploadWorker {
     this.logger = options.logger.child({ module: 'upload-worker' })
     this.intervalMs = options.intervalMs ?? 5_000
     this.concurrency = options.concurrency ?? 10
-    this.repairCooldownMs = options.repairCooldownMs ?? 300_000
-    this.probeIntervalMs = options.probeIntervalMs ?? 3_600_000
-    this.probeTimeoutMs = options.probeTimeoutMs ?? 8_000
-    this.unhealthyFailureThreshold = options.unhealthyFailureThreshold ?? 24
   }
 
   /** Start the periodic upload loop */
   start(): void {
-    this.logger.info({ intervalMs: this.intervalMs, concurrency: this.concurrency }, 'upload worker started')
+    this.logger.info(
+      {
+        uploadScanIntervalMs: this.intervalMs,
+        uploadConcurrency: this.concurrency,
+      },
+      'upload worker started'
+    )
     this.scheduleNext()
   }
 
@@ -105,29 +71,15 @@ export class UploadWorker {
     return this.activeCount
   }
 
-  getRepairStatus(): {
+  getStatus(): {
     scanIntervalMs: number
-    probeIntervalMs: number
-    probeTimeoutMs: number
-    unhealthyFailureThreshold: number
-    cooldownMs: number
-    pending: number
-    probing: number
     inProgress: number
-    coolingDown: number
+    concurrency: number
   } {
-    const now = Date.now()
-    this.pruneRepairCooldowns(now)
     return {
       scanIntervalMs: this.intervalMs,
-      probeIntervalMs: this.probeIntervalMs,
-      probeTimeoutMs: this.probeTimeoutMs,
-      unhealthyFailureThreshold: this.unhealthyFailureThreshold,
-      cooldownMs: this.repairCooldownMs,
-      pending: this.metadataStore.getUnderReplicatedCount(),
-      probing: this.activeProbeCount,
-      inProgress: this.activeRepairCount,
-      coolingDown: this.repairRetryAfter.size,
+      inProgress: this.activeCount,
+      concurrency: this.concurrency,
     }
   }
 
@@ -159,113 +111,11 @@ export class UploadWorker {
 
         this.logger.info({ succeeded, failed, total: pending.length }, 'upload batch complete')
       }
-
-      await this.runProbeCycle()
-      await this.runRepairCycle()
     } catch (error) {
       this.logger.error({ error }, 'upload worker cycle error')
     } finally {
       this.running = false
       this.scheduleNext()
-    }
-  }
-
-  private async runRepairCycle(): Promise<void> {
-    const candidates = this.metadataStore.getUnderReplicatedObjects(this.concurrency)
-    if (candidates.length === 0) return
-
-    const now = Date.now()
-    const ready = candidates.filter((item) => {
-      const repairKey = `${item.bucket}/${item.key}`
-      const retryAt = this.repairRetryAfter.get(repairKey)
-      return retryAt === undefined || retryAt <= now
-    })
-    if (ready.length === 0) return
-
-    this.logger.info({ count: ready.length }, 'starting copy repair batch')
-    await Promise.allSettled(ready.map((item) => this.repairOne(item)))
-  }
-
-  private async runProbeCycle(): Promise<void> {
-    const candidates = this.metadataStore.getCopyProbeCandidates(this.concurrency * 2, this.probeIntervalMs)
-    if (candidates.length === 0) return
-
-    await Promise.allSettled(
-      candidates.map(async (copy) => {
-        this.activeProbeCount++
-        try {
-          const ok = await this.synapseClient.probeCopy(copy.retrievalUrl, this.probeTimeoutMs)
-          if (ok) {
-            this.metadataStore.recordCopyProbeSuccess(copy.bucket, copy.key, copy.providerId)
-          } else {
-            this.metadataStore.recordCopyProbeFailure(
-              copy.bucket,
-              copy.key,
-              copy.providerId,
-              this.unhealthyFailureThreshold
-            )
-          }
-        } finally {
-          this.activeProbeCount--
-        }
-      })
-    )
-  }
-
-  private pruneRepairCooldowns(now: number): void {
-    for (const [key, retryAt] of this.repairRetryAfter.entries()) {
-      if (retryAt <= now) {
-        this.repairRetryAfter.delete(key)
-      }
-    }
-  }
-
-  private async repairOne(item: RepairItem): Promise<void> {
-    const { bucket, key, pieceCid, desiredCopies } = item
-    const repairKey = `${bucket}/${key}`
-    this.activeRepairCount++
-    try {
-      const allCopies = this.metadataStore.getObjectCopies(bucket, key)
-      const healthyCopies = this.metadataStore.getHealthyObjectCopies(bucket, key)
-      if (healthyCopies.length >= desiredCopies) {
-        this.repairRetryAfter.delete(repairKey)
-        return
-      }
-
-      const sourceCopies = healthyCopies.length > 0 ? healthyCopies : allCopies
-      if (sourceCopies.length === 0) {
-        this.repairRetryAfter.set(repairKey, Date.now() + this.repairCooldownMs)
-        return
-      }
-
-      const repairedCopies = await this.synapseClient.repairCopies({
-        pieceCid,
-        sourceCopies,
-        excludeProviderIds: allCopies.map((copy) => copy.providerId),
-        additionalCopies: desiredCopies - healthyCopies.length,
-      })
-      this.metadataStore.updateObjectCopies(bucket, key, pieceCid, repairedCopies)
-
-      const refreshedHealthy = this.metadataStore.getHealthyObjectCopies(bucket, key)
-
-      if (refreshedHealthy.length >= desiredCopies) {
-        this.repairRetryAfter.delete(repairKey)
-        this.logger.info(
-          { bucket, key, pieceCid, desiredCopies, healthyCopies: refreshedHealthy.length },
-          'copy repair complete'
-        )
-      } else {
-        this.repairRetryAfter.set(repairKey, Date.now() + this.repairCooldownMs)
-        this.logger.warn(
-          { bucket, key, pieceCid, desiredCopies, healthyCopies: refreshedHealthy.length },
-          'copy repair incomplete, will retry'
-        )
-      }
-    } catch (error) {
-      this.repairRetryAfter.set(repairKey, Date.now() + this.repairCooldownMs)
-      this.logger.warn({ bucket, key, pieceCid, error }, 'copy repair failed, will retry')
-    } finally {
-      this.activeRepairCount--
     }
   }
 
@@ -336,7 +186,7 @@ export class UploadWorker {
         this.localStore.delete(localPath)
         this.logger.warn(
           { bucket, key, pieceCid: result.pieceCid, desiredCopies, actualCopies: result.copies.length },
-          'upload completed with insufficient copies, will repair in background'
+          'upload completed with insufficient copies, queued for repair worker'
         )
         return
       }

@@ -134,7 +134,7 @@ Client ──PUT──→ Gateway ──save──→ Local Disk ──200 OK─
 - **Concurrent uploads**: Background worker processes up to 10 files in parallel
 - **Retry on failure**: Failed uploads retry up to 10 times
 - **Immediate availability**: Files can be downloaded immediately after upload (served from local disk)
-- **Self-healing replicas**: Background health probes + repair worker automatically refill missing healthy copies
+- **Self-healing replicas**: Independent `ProbeWorker` + `RepairWorker` refill missing healthy copies without blocking uploads
 
 ### Download (Local-First)
 
@@ -181,16 +181,26 @@ curl http://localhost:8333/_/status?detail=true
     "repairingFiles": 1,
     "coolingDownFiles": 1
   },
+  "uploadWorker": {
+    "scanIntervalMs": 5000,
+    "inProgress": 2,
+    "concurrency": 10
+  },
+  "probe": {
+    "scanIntervalMs": 5000,
+    "concurrency": 10,
+    "probeIntervalMs": 3600000,
+    "probeTimeoutMs": 5000,
+    "unhealthyFailureThreshold": 24,
+    "inProgress": 0
+  },
   "repair": {
     "scanIntervalMs": 5000,
-    "probeIntervalMs": 3600000,
-    "probeTimeoutMs": 8000,
-    "unhealthyFailureThreshold": 24,
     "cooldownMs": 300000,
     "pending": 3,
-    "probing": 0,
     "inProgress": 1,
-    "coolingDown": 1
+    "coolingDown": 1,
+    "concurrency": 10
   },
   "uploads": { "pending": 3, "uploading": 2, "uploaded": 15, "failed": 1 },
   "disk": {
@@ -309,7 +319,9 @@ src/
 │   ├── metadata-store.ts     # SQLite: objects + copies + buckets + multipart + upload status
 │   ├── synapse-client.ts     # Synapse SDK wrapper (upload + fallback download)
 │   ├── local-store.ts        # Local disk staging (staging/ + multipart/ directories)
-│   ├── upload-worker.ts      # Background async FOC upload (10 concurrent, retry up to 10×)
+│   ├── upload-worker.ts      # Upload loop only (pending/failed -> uploaded)
+│   ├── probe-worker.ts       # Copy health probe loop (HEAD/Range probe + status update)
+│   ├── repair-worker.ts      # Under-replicated repair loop (SP-to-SP pull + cooldown)
 │   └── cleanup-worker.ts     # Background SP piece cleanup for deleted objects
 └── webdav/
     ├── server.ts             # WebDAV Fastify server (separate port)
@@ -357,15 +369,19 @@ The gateway stores staged files alongside the database:
 | `-w, --webdav-port` | — | S3 port + 1 | WebDAV server port |
 | `-c, --copies` | `COPIES` | `2` | Desired copies for newly uploaded objects |
 
-### Repair & Probe Tunables (Env Only)
+### Upload / Probe / Repair Tunables (Env Only)
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `UPLOAD_SCAN_INTERVAL_MS` | `5000` | Main upload/repair scheduler loop interval |
-| `UPLOAD_CONCURRENCY` | `10` | Max concurrent uploads and repair/probe batch size multiplier |
+| `UPLOAD_SCAN_INTERVAL_MS` | `5000` | Upload worker scan interval |
+| `UPLOAD_CONCURRENCY` | `10` | Max concurrent uploads |
+| `PROBE_SCAN_INTERVAL_MS` | `5000` | Probe worker scan interval |
+| `PROBE_CONCURRENCY` | `10` | Max concurrent probe requests |
 | `COPY_PROBE_INTERVAL_MS` | `3600000` | Minimum re-check interval per copy (1 hour) |
-| `COPY_PROBE_TIMEOUT_MS` | `8000` | Timeout per health probe request |
+| `COPY_PROBE_TIMEOUT_MS` | `5000` | Timeout per health probe request |
 | `COPY_UNHEALTHY_FAILURE_THRESHOLD` | `24` | Consecutive probe failures before marking copy unhealthy |
+| `REPAIR_SCAN_INTERVAL_MS` | `5000` | Repair worker scan interval |
+| `REPAIR_CONCURRENCY` | `10` | Max concurrent object repairs |
 | `REPAIR_COOLDOWN_MS` | `300000` | Per-object cooldown after failed/incomplete repair (5 minutes) |
 
 Notes:

@@ -12,6 +12,8 @@ import { registerRoutes } from './routes/index.js'
 import { CleanupWorker } from './storage/cleanup-worker.js'
 import { LocalStore } from './storage/local-store.js'
 import { MetadataStore } from './storage/metadata-store.js'
+import { ProbeWorker, type ProbeWorkerOptions } from './storage/probe-worker.js'
+import { RepairWorker, type RepairWorkerOptions } from './storage/repair-worker.js'
 import { SynapseClient } from './storage/synapse-client.js'
 import { UploadWorker, type UploadWorkerOptions } from './storage/upload-worker.js'
 import { startWebDavServer } from './webdav/server.js'
@@ -29,9 +31,13 @@ export interface ServerOptions {
   copies?: number | undefined
   scanIntervalMs?: number | undefined
   uploadConcurrency?: number | undefined
+  probeScanIntervalMs?: number | undefined
+  probeConcurrency?: number | undefined
   probeIntervalMs?: number | undefined
   probeTimeoutMs?: number | undefined
   unhealthyFailureThreshold?: number | undefined
+  repairScanIntervalMs?: number | undefined
+  repairConcurrency?: number | undefined
   repairCooldownMs?: number | undefined
 }
 
@@ -114,25 +120,46 @@ export async function createServer(options: ServerOptions) {
   }
   const scanIntervalMs = options.scanIntervalMs ?? readPositiveIntEnv('UPLOAD_SCAN_INTERVAL_MS')
   const uploadConcurrency = options.uploadConcurrency ?? readPositiveIntEnv('UPLOAD_CONCURRENCY')
+  const probeScanIntervalMs = options.probeScanIntervalMs ?? readPositiveIntEnv('PROBE_SCAN_INTERVAL_MS')
+  const probeConcurrency = options.probeConcurrency ?? readPositiveIntEnv('PROBE_CONCURRENCY')
   const probeIntervalMs = options.probeIntervalMs ?? readPositiveIntEnv('COPY_PROBE_INTERVAL_MS')
   const probeTimeoutMs = options.probeTimeoutMs ?? readPositiveIntEnv('COPY_PROBE_TIMEOUT_MS')
   const unhealthyFailureThreshold =
     options.unhealthyFailureThreshold ?? readPositiveIntEnv('COPY_UNHEALTHY_FAILURE_THRESHOLD')
+  const repairScanIntervalMs = options.repairScanIntervalMs ?? readPositiveIntEnv('REPAIR_SCAN_INTERVAL_MS')
+  const repairConcurrency = options.repairConcurrency ?? readPositiveIntEnv('REPAIR_CONCURRENCY')
   const repairCooldownMs = options.repairCooldownMs ?? readPositiveIntEnv('REPAIR_COOLDOWN_MS')
 
   if (scanIntervalMs !== undefined) uploadWorkerOptions.intervalMs = scanIntervalMs
   if (uploadConcurrency !== undefined) uploadWorkerOptions.concurrency = uploadConcurrency
-  if (probeIntervalMs !== undefined) uploadWorkerOptions.probeIntervalMs = probeIntervalMs
-  if (probeTimeoutMs !== undefined) uploadWorkerOptions.probeTimeoutMs = probeTimeoutMs
-  if (unhealthyFailureThreshold !== undefined) {
-    uploadWorkerOptions.unhealthyFailureThreshold = unhealthyFailureThreshold
-  }
-  if (repairCooldownMs !== undefined) uploadWorkerOptions.repairCooldownMs = repairCooldownMs
 
   const uploadWorker = new UploadWorker(uploadWorkerOptions)
+  const probeWorkerOptions: ProbeWorkerOptions = {
+    metadataStore,
+    synapseClient,
+    logger,
+  }
+  if (probeScanIntervalMs !== undefined) probeWorkerOptions.scanIntervalMs = probeScanIntervalMs
+  if (probeConcurrency !== undefined) probeWorkerOptions.concurrency = probeConcurrency
+  if (probeIntervalMs !== undefined) probeWorkerOptions.probeIntervalMs = probeIntervalMs
+  if (probeTimeoutMs !== undefined) probeWorkerOptions.probeTimeoutMs = probeTimeoutMs
+  if (unhealthyFailureThreshold !== undefined) {
+    probeWorkerOptions.unhealthyFailureThreshold = unhealthyFailureThreshold
+  }
+  const probeWorker = new ProbeWorker(probeWorkerOptions)
+
+  const repairWorkerOptions: RepairWorkerOptions = {
+    metadataStore,
+    synapseClient,
+    logger,
+  }
+  if (repairScanIntervalMs !== undefined) repairWorkerOptions.scanIntervalMs = repairScanIntervalMs
+  if (repairConcurrency !== undefined) repairWorkerOptions.concurrency = repairConcurrency
+  if (repairCooldownMs !== undefined) repairWorkerOptions.cooldownMs = repairCooldownMs
+  const repairWorker = new RepairWorker(repairWorkerOptions)
 
   // Register S3 routes
-  registerRoutes(app, { metadataStore, synapseClient, localStore, uploadWorker, logger })
+  registerRoutes(app, { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, logger })
 
   // Clean up orphaned staging files on startup
   const knownPaths = metadataStore.getAllLocalPaths()
@@ -141,19 +168,24 @@ export async function createServer(options: ServerOptions) {
   // Graceful shutdown
   app.addHook('onClose', () => {
     uploadWorker.stop()
+    probeWorker.stop()
+    repairWorker.stop()
     cleanupWorker.stop()
     metadataStore.close()
   })
 
-  return { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker }
+  return { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker, probeWorker, repairWorker }
 }
 
 export async function startServer(options: ServerOptions): Promise<void> {
-  const { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker } = await createServer(options)
+  const { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker, probeWorker, repairWorker } =
+    await createServer(options)
 
   try {
     cleanupWorker.start()
     uploadWorker.start()
+    probeWorker.start()
+    repairWorker.start()
     await app.listen({ port: options.port, host: options.host })
 
     const address = app.server.address()

@@ -47,7 +47,9 @@ describe('S3 Routes', () => {
   let metadataStore: MetadataStore
   let mockSynapse: ReturnType<typeof createMockSynapseClient>
   let localStore: LocalStore
-  let mockUploadWorker: { getRepairStatus: ReturnType<typeof vi.fn> }
+  let mockUploadWorker: { getStatus: ReturnType<typeof vi.fn> }
+  let mockProbeWorker: { getStatus: ReturnType<typeof vi.fn> }
+  let mockRepairWorker: { getStatus: ReturnType<typeof vi.fn> }
   let tempDir: string
 
   beforeEach(async () => {
@@ -58,16 +60,30 @@ describe('S3 Routes', () => {
     mockSynapse = createMockSynapseClient()
     localStore = new LocalStore({ dataDir: tempDir, logger })
     mockUploadWorker = {
-      getRepairStatus: vi.fn().mockReturnValue({
+      getStatus: vi.fn().mockReturnValue({
         scanIntervalMs: 5000,
+        inProgress: 0,
+        concurrency: 10,
+      }),
+    }
+    mockProbeWorker = {
+      getStatus: vi.fn().mockReturnValue({
+        scanIntervalMs: 5000,
+        concurrency: 10,
         probeIntervalMs: 3600000,
-        probeTimeoutMs: 8000,
+        probeTimeoutMs: 5000,
         unhealthyFailureThreshold: 24,
+        inProgress: 0,
+      }),
+    }
+    mockRepairWorker = {
+      getStatus: vi.fn().mockReturnValue({
+        scanIntervalMs: 5000,
         cooldownMs: 300000,
         pending: 0,
-        probing: 0,
         inProgress: 0,
         coolingDown: 0,
+        concurrency: 10,
       }),
     }
 
@@ -82,6 +98,8 @@ describe('S3 Routes', () => {
       synapseClient: mockSynapse as any,
       localStore,
       uploadWorker: mockUploadWorker as any,
+      probeWorker: mockProbeWorker as any,
+      repairWorker: mockRepairWorker as any,
       logger,
     })
   })
@@ -95,7 +113,7 @@ describe('S3 Routes', () => {
   // ── ListBuckets: GET / ──────────────────────────────────────────────
 
   describe('GET /_/status', () => {
-    it('returns repair worker settings', async () => {
+    it('returns upload/probe/repair worker settings', async () => {
       metadataStore.putObject('default', 'a.bin', 'cid-a', 100, 'application/octet-stream', 'etag-a', [
         {
           providerId: '42',
@@ -144,17 +162,51 @@ describe('S3 Routes', () => {
       expect(body.replication.failedFiles).toBe(0)
       expect(body.replication.repairingFiles).toBe(0)
       expect(body.replication.coolingDownFiles).toBe(0)
+      expect(body.uploadWorker).toEqual({
+        scanIntervalMs: 5000,
+        inProgress: 0,
+        concurrency: 10,
+      })
+      expect(body.probe).toEqual({
+        scanIntervalMs: 5000,
+        concurrency: 10,
+        probeIntervalMs: 3600000,
+        probeTimeoutMs: 5000,
+        unhealthyFailureThreshold: 24,
+        inProgress: 0,
+      })
       expect(body.repair).toEqual({
         scanIntervalMs: 5000,
-        probeIntervalMs: 3600000,
-        probeTimeoutMs: 8000,
-        unhealthyFailureThreshold: 24,
         cooldownMs: 300000,
         pending: 0,
-        probing: 0,
         inProgress: 0,
         coolingDown: 0,
+        concurrency: 10,
       })
+    })
+
+    it('omits optional sections when workers are not provided', async () => {
+      const minimalApp = Fastify({ logger: false })
+      minimalApp.removeAllContentTypeParsers()
+      minimalApp.addContentTypeParser('*', (_request: any, _payload: any, done: (err: null) => void) => {
+        done(null)
+      })
+
+      registerRoutes(minimalApp, {
+        metadataStore,
+        synapseClient: mockSynapse as any,
+        localStore,
+        logger,
+      })
+
+      const response = await minimalApp.inject({ method: 'GET', url: '/_/status' })
+      expect(response.statusCode).toBe(200)
+      const body = response.json() as Record<string, any>
+      expect(body.uploadWorker).toBeUndefined()
+      expect(body.probe).toBeUndefined()
+      expect(body.repair).toBeUndefined()
+
+      await minimalApp.close()
     })
   })
 
