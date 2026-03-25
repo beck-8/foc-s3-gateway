@@ -106,8 +106,8 @@ export class UploadWorker {
         // Upload all items in parallel
         const results = await Promise.allSettled(pending.map((item) => this.uploadOne(item)))
 
-        const succeeded = results.filter((r) => r.status === 'fulfilled').length
-        const failed = results.filter((r) => r.status === 'rejected').length
+        const succeeded = results.filter((r) => r.status === 'fulfilled' && r.value === true).length
+        const failed = pending.length - succeeded
 
         this.logger.info({ succeeded, failed, total: pending.length }, 'upload batch complete')
       }
@@ -120,13 +120,13 @@ export class UploadWorker {
   }
 
   /** Upload a single staged object to FOC */
-  private async uploadOne(item: PendingItem): Promise<void> {
+  private async uploadOne(item: PendingItem): Promise<boolean> {
     const { bucket, key, localPath, desiredCopies } = item
 
     if (!this.localStore.exists(localPath)) {
       this.logger.warn({ bucket, key, localPath }, 'local file missing, marking failed')
       this.metadataStore.markUploadFailed(bucket, key)
-      return
+      return false
     }
 
     // Validate file size before upload attempt (1 GiB max for FOC)
@@ -137,7 +137,7 @@ export class UploadWorker {
         'file exceeds maximum upload size, marking failed'
       )
       this.metadataStore.markUploadFailed(bucket, key)
-      return
+      return false
     }
 
     this.activeCount++
@@ -188,7 +188,7 @@ export class UploadWorker {
           { bucket, key, pieceCid: result.pieceCid, desiredCopies, actualCopies: result.copies.length },
           'upload completed with insufficient copies, queued for repair worker'
         )
-        return
+        return true
       }
 
       // Success: update metadata and remove local file
@@ -199,9 +199,11 @@ export class UploadWorker {
         { bucket, key, pieceCid: result.pieceCid, copies: result.copies.length },
         'async upload to FOC complete'
       )
+      return true
     } catch (error) {
       this.logger.error({ bucket, key, error }, 'async upload failed, will retry')
       this.metadataStore.markUploadFailed(bucket, key)
+      return false
     } finally {
       this.activeCount--
     }
