@@ -39,7 +39,7 @@ function parseDavPath(url: string): { bucket?: string; key?: string } {
 
 /** Get Depth header (0, 1, or infinity) */
 function getDepth(request: FastifyRequest): number {
-  const depth = request.headers['depth']
+  const depth = request.headers.depth
   if (depth === '0') return 0
   if (depth === '1' || depth === undefined) return 1
   return Number.POSITIVE_INFINITY
@@ -281,7 +281,7 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
     url: '/*',
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const { bucket: srcBucket, key: srcKey } = parseDavPath(request.url)
-      const destination = request.headers['destination'] as string | undefined
+      const destination = request.headers.destination as string | undefined
 
       logger.debug({ srcBucket, srcKey, destination }, 'WebDAV COPY')
 
@@ -319,7 +319,7 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
     url: '/*',
     handler: async (request: FastifyRequest, reply: FastifyReply) => {
       const { bucket: srcBucket, key: srcKey } = parseDavPath(request.url)
-      const destination = request.headers['destination'] as string | undefined
+      const destination = request.headers.destination as string | undefined
 
       logger.debug({ srcBucket, srcKey, destination }, 'WebDAV MOVE')
 

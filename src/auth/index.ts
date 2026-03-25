@@ -89,7 +89,7 @@ export function createAuthHook(options: AuthOptions) {
               message: 'Access Denied',
               resource: request.url,
               requestId: Math.random().toString(36).substring(2, 18).toUpperCase(),
-            }),
+            })
           )
       } else {
         // S3 clients: always 403 (AWS spec — S3 never returns 401)

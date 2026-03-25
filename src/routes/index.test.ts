@@ -114,7 +114,7 @@ describe('S3 Routes', () => {
       const response = await app.inject({ method: 'PUT', url: '/photos' })
 
       expect(response.statusCode).toBe(200)
-      expect(response.headers['location']).toBe('/photos')
+      expect(response.headers.location).toBe('/photos')
 
       // Verify bucket is accessible
       const head = await app.inject({ method: 'HEAD', url: '/photos' })
@@ -280,7 +280,7 @@ describe('S3 Routes', () => {
 
       const tokenMatch = page1.body.match(/<NextContinuationToken>(.*?)<\/NextContinuationToken>/)
       expect(tokenMatch).toBeTruthy()
-      const token = tokenMatch![1]
+      const token = tokenMatch?.[1]
 
       // Second page: using continuation-token
       const page2 = await app.inject({ method: 'GET', url: `/default?max-keys=2&continuation-token=${token}` })
@@ -304,7 +304,7 @@ describe('S3 Routes', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(response.headers['etag']).toBeDefined()
+      expect(response.headers.etag).toBeDefined()
 
       // Synapse upload should NOT have been called (async, deferred)
       expect(mockSynapse.upload).not.toHaveBeenCalled()
@@ -317,7 +317,10 @@ describe('S3 Routes', () => {
       // Local path should be set
       const localPath = metadataStore.getLocalPath('default', 'hello.txt')
       expect(localPath).toBeDefined()
-      expect(localStore.exists(localPath!)).toBe(true)
+      if (localPath === undefined) {
+        throw new Error('expected local path for staged object')
+      }
+      expect(localStore.exists(localPath)).toBe(true)
     })
 
     it('returns 404 for invalid bucket', async () => {
@@ -351,7 +354,7 @@ describe('S3 Routes', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(response.headers['etag']).toBeDefined()
+      expect(response.headers.etag).toBeDefined()
 
       const obj = metadataStore.getObject('default', 'empty.txt')
       expect(obj).toBeDefined()
@@ -456,7 +459,7 @@ describe('S3 Routes', () => {
 
       expect(response.statusCode).toBe(200)
       expect(response.headers['content-type']).toBe('text/plain')
-      expect(response.headers['etag']).toBe('"etag1"')
+      expect(response.headers.etag).toBe('"etag1"')
       expect(mockSynapse.download).toHaveBeenCalledWith('baga-cid', [])
       expect(response.body).toBe('Hello')
     })
@@ -535,7 +538,7 @@ describe('S3 Routes', () => {
       expect(response.statusCode).toBe(200)
       expect(response.headers['content-type']).toBe('application/pdf')
       expect(response.headers['content-length']).toBe('4096')
-      expect(response.headers['etag']).toBe('"etag-pdf"')
+      expect(response.headers.etag).toBe('"etag-pdf"')
       expect(response.headers['last-modified']).toBeDefined()
     })
 
@@ -596,13 +599,16 @@ describe('S3 Routes', () => {
 
       const localPath = metadataStore.getLocalPath('default', 'staged.txt')
       expect(localPath).toBeDefined()
-      expect(localStore.exists(localPath!)).toBe(true)
+      if (localPath === undefined) {
+        throw new Error('expected local path for staged object')
+      }
+      expect(localStore.exists(localPath)).toBe(true)
 
       // Delete it
       await app.inject({ method: 'DELETE', url: '/default/staged.txt' })
 
       // Local file should be gone
-      expect(localStore.exists(localPath!)).toBe(false)
+      expect(localStore.exists(localPath)).toBe(false)
     })
   })
 
@@ -688,7 +694,7 @@ describe('S3 Routes', () => {
       // Extract uploadId from XML
       const uploadIdMatch = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)
       expect(uploadIdMatch).toBeTruthy()
-      const uploadId = uploadIdMatch![1]
+      const uploadId = uploadIdMatch?.[1]
 
       // 2. Upload parts (~128 bytes each, well above minimum when combined)
       const part1Data = 'A'.repeat(128)
@@ -698,7 +704,7 @@ describe('S3 Routes', () => {
         payload: part1Data,
       })
       expect(part1.statusCode).toBe(200)
-      expect(part1.headers['etag']).toBeDefined()
+      expect(part1.headers.etag).toBeDefined()
 
       const part2Data = 'B'.repeat(128)
       const part2 = await app.inject({
@@ -735,7 +741,7 @@ describe('S3 Routes', () => {
         method: 'POST',
         url: '/default/aborted.txt?uploads=',
       })
-      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)?.[1]
 
       // Upload a part
       await app.inject({
@@ -788,7 +794,7 @@ describe('S3 Routes', () => {
         method: 'POST',
         url: '/default/original.txt?uploads=',
       })
-      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)?.[1]
 
       const response = await app.inject({
         method: 'PUT',
@@ -805,7 +811,7 @@ describe('S3 Routes', () => {
         method: 'POST',
         url: '/default/original.txt?uploads=',
       })
-      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)?.[1]
 
       await app.inject({
         method: 'PUT',
@@ -829,7 +835,7 @@ describe('S3 Routes', () => {
         method: 'POST',
         url: '/default/original.txt?uploads=',
       })
-      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)?.[1]
 
       const response = await app.inject({
         method: 'DELETE',

@@ -273,12 +273,21 @@ export class MetadataStore {
       et = bucketOrOptions.etag
       cp = bucketOrOptions.copies
     } else {
+      if (
+        key === undefined ||
+        pieceCid === undefined ||
+        size === undefined ||
+        contentType === undefined ||
+        etag === undefined
+      ) {
+        throw new Error('putObject requires key, pieceCid, size, contentType, and etag')
+      }
       bucket = bucketOrOptions
-      k = key!
-      pc = pieceCid!
-      sz = size!
-      ct = contentType!
-      et = etag!
+      k = key
+      pc = pieceCid
+      sz = size
+      ct = contentType
+      et = etag
       cp = copies
     }
 
@@ -633,7 +642,11 @@ export class MetadataStore {
     transaction()
     this.logger.debug({ srcBucket, srcKey, dstBucket, dstKey, pieceCid: src.pieceCid }, 'object copied')
 
-    return this.getObject(dstBucket, dstKey)!
+    const copied = this.getObject(dstBucket, dstKey)
+    if (!copied) {
+      throw new Error('copyObject failed to load copied destination object')
+    }
+    return copied
   }
 
   objectExists(bucket: string, key: string): boolean {

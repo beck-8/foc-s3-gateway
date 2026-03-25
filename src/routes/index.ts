@@ -102,7 +102,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
 
     // ?detail=true → include object lists for pending/uploading/failed
-    if (query['detail'] === 'true') {
+    if (query.detail === 'true') {
       result.pending = metadataStore.getObjectsByStatus('pending').map(addFormattedSize)
       result.uploading = metadataStore.getObjectsByStatus('uploading').map(addFormattedSize)
       result.failed = metadataStore.getObjectsByStatus('failed').map(addFormattedSize)
@@ -203,8 +203,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     logger.debug({ bucket, query }, 'ListObjectsV2')
 
-    const prefix = query['prefix'] ?? ''
-    const delimiter = query['delimiter'] ?? ''
+    const prefix = query.prefix ?? ''
+    const delimiter = query.delimiter ?? ''
     const maxKeys = Math.min(Number.parseInt(query['max-keys'] ?? '1000', 10), 1000)
     const startAfter = query['start-after'] ?? query['continuation-token']
 
@@ -306,8 +306,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
       logger.debug({ bucket, query }, 'ListObjectsV2 (trailing slash)')
 
-      const prefix = query['prefix'] ?? ''
-      const delimiter = query['delimiter'] ?? ''
+      const prefix = query.prefix ?? ''
+      const delimiter = query.delimiter ?? ''
       const maxKeys = Math.min(Number.parseInt(query['max-keys'] ?? '1000', 10), 1000)
       const startAfter = query['start-after'] ?? query['continuation-token']
 
@@ -491,7 +491,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     // ── CompleteMultipartUpload: POST /{bucket}/{key}?uploadId=X ──────
     if ('uploadId' in query) {
-      const uploadId = query['uploadId']
+      const uploadId = query.uploadId
       logger.debug({ bucket, key, uploadId }, 'CompleteMultipartUpload')
 
       const upload = metadataStore.getMultipartUpload(uploadId)
@@ -585,8 +585,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     // ── UploadPart: PUT /{bucket}/{key}?partNumber=N&uploadId=X ──────
     if ('partNumber' in query && 'uploadId' in query) {
-      const partNumber = Number.parseInt(query['partNumber'], 10)
-      const uploadId = query['uploadId']
+      const partNumber = Number.parseInt(query.partNumber, 10)
+      const uploadId = query.uploadId
       logger.debug({ bucket, key, uploadId, partNumber }, 'UploadPart')
 
       const upload = metadataStore.getMultipartUpload(uploadId)
@@ -745,7 +745,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     // ── AbortMultipartUpload: DELETE /{bucket}/{key}?uploadId=X ──────
     if ('uploadId' in query) {
-      const uploadId = query['uploadId']
+      const uploadId = query.uploadId
       logger.debug({ bucket, key, uploadId }, 'AbortMultipartUpload')
 
       const upload = metadataStore.getMultipartUpload(uploadId)

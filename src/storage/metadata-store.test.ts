@@ -376,8 +376,7 @@ describe('MetadataStore', () => {
         'documents/notes.txt',
         'readme.md',
       ]
-      for (let i = 0; i < files.length; i++) {
-        const key = files[i]!
+      for (const [i, key] of files.entries()) {
         store.putObject('default', key, `cid-${i}`, (i + 1) * 100, 'application/octet-stream', `etag-${i}`)
       }
     })
@@ -424,9 +423,13 @@ describe('MetadataStore', () => {
       const page2 = store.listObjects('default', '', '', 3, lastKey)
 
       expect(page2.objects).toHaveLength(3)
+      expect(lastKey).toBeDefined()
+      if (lastKey === undefined) {
+        throw new Error('expected lastKey from first page')
+      }
       // Page 2 keys should all be after page 1 last key
       for (const obj of page2.objects) {
-        expect(obj.key > lastKey!).toBe(true)
+        expect(obj.key > lastKey).toBe(true)
       }
     })
 

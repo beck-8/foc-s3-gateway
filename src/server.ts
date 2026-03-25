@@ -164,9 +164,9 @@ function getDefaultDbPath(): string {
     case 'darwin':
       return path.join(homedir(), 'Library', 'Application Support', appName, 'metadata.db')
     case 'win32':
-      return path.join(process.env['APPDATA'] ?? path.join(homedir(), 'AppData', 'Roaming'), appName, 'metadata.db')
+      return path.join(process.env.APPDATA ?? path.join(homedir(), 'AppData', 'Roaming'), appName, 'metadata.db')
     default:
       // Linux / other — follow XDG Base Directory spec
-      return path.join(process.env['XDG_DATA_HOME'] ?? path.join(homedir(), '.local', 'share'), appName, 'metadata.db')
+      return path.join(process.env.XDG_DATA_HOME ?? path.join(homedir(), '.local', 'share'), appName, 'metadata.db')
   }
 }

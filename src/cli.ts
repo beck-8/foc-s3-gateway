@@ -24,22 +24,22 @@ program
   .option('-s, --secret-key <key>', 'Secret key for authentication (or set SECRET_KEY env)')
   .option('-w, --webdav-port <port>', 'WebDAV server port (default: S3 port + 1)')
   .action(async (options) => {
-    const privateKey = options.privateKey ?? process.env['PRIVATE_KEY']
+    const privateKey = options.privateKey ?? process.env.PRIVATE_KEY
     if (!privateKey) {
       console.error('Error: --private-key or PRIVATE_KEY env is required')
       process.exit(1)
     }
 
-    const rpcUrl = options.rpcUrl ?? process.env['RPC_URL'] ?? getRpcUrl(options.network)
+    const rpcUrl = options.rpcUrl ?? process.env.RPC_URL ?? getRpcUrl(options.network)
 
     await startServer({
       port: Number.parseInt(options.port, 10),
       host: options.host,
       privateKey,
       rpcUrl,
-      dbPath: options.dbPath ?? process.env['DB_PATH'],
-      accessKey: options.accessKey ?? process.env['ACCESS_KEY'],
-      secretKey: options.secretKey ?? process.env['SECRET_KEY'],
+      dbPath: options.dbPath ?? process.env.DB_PATH,
+      accessKey: options.accessKey ?? process.env.ACCESS_KEY,
+      secretKey: options.secretKey ?? process.env.SECRET_KEY,
       webdavPort: options.webdavPort ? Number.parseInt(options.webdavPort, 10) : undefined,
     })
   })

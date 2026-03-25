@@ -73,9 +73,9 @@ describe('WebDAV Routes', () => {
       const response = await app.inject({ method: 'OPTIONS', url: '/test' })
 
       expect(response.statusCode).toBe(200)
-      expect(response.headers['dav']).toBe('1')
-      expect(response.headers['allow']).toContain('PROPFIND')
-      expect(response.headers['allow']).toContain('PUT')
+      expect(response.headers.dav).toBe('1')
+      expect(response.headers.allow).toContain('PROPFIND')
+      expect(response.headers.allow).toContain('PUT')
     })
   })
 
@@ -323,7 +323,7 @@ describe('WebDAV Routes', () => {
       expect(response.statusCode).toBe(200)
       expect(response.headers['content-type']).toBe('text/plain')
       expect(response.headers['content-length']).toBe('512')
-      expect(response.headers['etag']).toBe('"etag-info"')
+      expect(response.headers.etag).toBe('"etag-info"')
       // Note: Fastify auto-generates HEAD from GET via raw stream; body may not be empty
       // in inject mode. The protocol-level guarantee is that real HTTP HEAD strips body.
     })
@@ -431,11 +431,14 @@ describe('WebDAV Routes', () => {
 
       const localPath = metadataStore.getLocalPath('default', 'staged.bin')
       expect(localPath).toBeDefined()
-      expect(localStore.exists(localPath!)).toBe(true)
+      if (localPath === undefined) {
+        throw new Error('expected local path for staged object')
+      }
+      expect(localStore.exists(localPath)).toBe(true)
 
       await app.inject({ method: 'DELETE', url: '/default/staged.bin' })
 
-      expect(localStore.exists(localPath!)).toBe(false)
+      expect(localStore.exists(localPath)).toBe(false)
     })
   })
 
