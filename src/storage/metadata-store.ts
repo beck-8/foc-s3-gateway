@@ -912,20 +912,18 @@ export class MetadataStore {
            o.piece_cid as pieceCid,
            o.desired_copies as desiredCopies,
            o.copies_count as copiesCount,
-           (
-             SELECT COUNT(*)
-             FROM object_copies c
-             WHERE c.bucket = o.bucket AND c.key = o.key AND c.health_status = 'healthy'
-           ) as healthyCopies
+           COALESCE(h.healthyCopies, 0) as healthyCopies
          FROM objects o
+         LEFT JOIN (
+           SELECT bucket, key, COUNT(*) as healthyCopies
+           FROM object_copies
+           WHERE health_status = 'healthy'
+           GROUP BY bucket, key
+         ) h ON h.bucket = o.bucket AND h.key = o.key
          WHERE o.deleted = 0
            AND o.status = 'uploaded'
            AND o.piece_cid != ''
-           AND (
-             SELECT COUNT(*)
-             FROM object_copies c
-             WHERE c.bucket = o.bucket AND c.key = o.key AND c.health_status = 'healthy'
-           ) < o.desired_copies
+           AND COALESCE(h.healthyCopies, 0) < o.desired_copies
          ORDER BY o.updated_at ASC
          LIMIT ?`
       )
@@ -936,15 +934,17 @@ export class MetadataStore {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) as count
-         FROM objects
-         WHERE deleted = 0
-           AND status = 'uploaded'
-           AND piece_cid != ''
-           AND (
-             SELECT COUNT(*)
-             FROM object_copies c
-             WHERE c.bucket = objects.bucket AND c.key = objects.key AND c.health_status = 'healthy'
-           ) < desired_copies`
+         FROM objects o
+         LEFT JOIN (
+           SELECT bucket, key, COUNT(*) as healthyCopies
+           FROM object_copies
+           WHERE health_status = 'healthy'
+           GROUP BY bucket, key
+         ) h ON h.bucket = o.bucket AND h.key = o.key
+         WHERE o.deleted = 0
+           AND o.status = 'uploaded'
+           AND o.piece_cid != ''
+           AND COALESCE(h.healthyCopies, 0) < o.desired_copies`
       )
       .get() as { count: number }
     return row.count
