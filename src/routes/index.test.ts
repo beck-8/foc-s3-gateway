@@ -409,6 +409,34 @@ describe('S3 Routes', () => {
       expect(metadataStore.getObject('archive', 'report.pdf')?.pieceCid).toBe('cid2')
     })
 
+    it('accepts absolute URL x-amz-copy-source values', async () => {
+      metadataStore.putObject('default', 'from-url.txt', 'cid-url', 42, 'text/plain', 'etag-url')
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/to-url.txt',
+        headers: { 'x-amz-copy-source': 'http://localhost/default/from-url.txt' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('<CopyObjectResult>')
+      expect(metadataStore.getObject('default', 'to-url.txt')?.pieceCid).toBe('cid-url')
+    })
+
+    it('ignores query string in x-amz-copy-source values', async () => {
+      metadataStore.putObject('default', 'from-query.txt', 'cid-query', 42, 'text/plain', 'etag-query')
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/to-query.txt',
+        headers: { 'x-amz-copy-source': '/default/from-query.txt?versionId=null' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('<CopyObjectResult>')
+      expect(metadataStore.getObject('default', 'to-query.txt')?.pieceCid).toBe('cid-query')
+    })
+
     it('returns 404 for non-existent source', async () => {
       const response = await app.inject({
         method: 'PUT',

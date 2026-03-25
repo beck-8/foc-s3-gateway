@@ -71,6 +71,34 @@ function addFormattedSize<T extends { size: number }>(item: T): T & { sizeFormat
   return { ...item, sizeFormatted: formatBytes(item.size) }
 }
 
+function parseCopySource(copySource: string): { bucket: string; key: string } | undefined {
+  let normalized = copySource
+
+  try {
+    if (copySource.startsWith('http://') || copySource.startsWith('https://')) {
+      normalized = new URL(copySource).pathname
+    } else {
+      normalized = copySource.split('?')[0] ?? copySource
+    }
+  } catch {
+    normalized = copySource.split('?')[0] ?? copySource
+  }
+
+  if (normalized.startsWith('/')) {
+    normalized = normalized.slice(1)
+  }
+
+  const slashIdx = normalized.indexOf('/')
+  if (slashIdx < 0) {
+    return undefined
+  }
+
+  return {
+    bucket: decodeURIComponent(normalized.slice(0, slashIdx)),
+    key: decodeURIComponent(normalized.slice(slashIdx + 1)),
+  }
+}
+
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { metadataStore, synapseClient, localStore, logger } = ctx
 
@@ -610,17 +638,15 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     // ── CopyObject: detected by x-amz-copy-source header ───────────
     const copySource = request.headers['x-amz-copy-source'] as string | undefined
     if (copySource) {
-      logger.debug({ bucket, key, copySource }, 'CopyObject')
-
-      // Parse source: "/{bucket}/{key}" or "{bucket}/{key}"
-      const normalized = copySource.startsWith('/') ? copySource.slice(1) : copySource
-      const slashIdx = normalized.indexOf('/')
-      if (slashIdx < 0) {
+      const parsedCopySource = parseCopySource(copySource)
+      if (!parsedCopySource) {
+        logger.debug({ bucket, key, copySource }, 'CopyObject rejected: invalid source format')
         sendS3Error(reply, 400, 'InvalidArgument', 'Invalid x-amz-copy-source format', copySource)
         return
       }
-      const srcBucket = decodeURIComponent(normalized.slice(0, slashIdx))
-      const srcKey = decodeURIComponent(normalized.slice(slashIdx + 1))
+      const { bucket: srcBucket, key: srcKey } = parsedCopySource
+
+      logger.debug({ bucket, key, copySource, srcBucket, srcKey }, 'CopyObject')
 
       if (!metadataStore.bucketExists(srcBucket)) {
         sendNoSuchBucket(reply, srcBucket)
