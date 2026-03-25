@@ -28,11 +28,13 @@ import {
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
+import type { UploadWorker } from '../storage/upload-worker.js'
 
 export interface RouteContext {
   metadataStore: MetadataStore
   synapseClient: SynapseClient
   localStore: LocalStore
+  uploadWorker?: UploadWorker | undefined
   logger: Logger
 }
 
@@ -109,7 +111,7 @@ function parseCopySource(copySource: string): { bucket: string; key: string } | 
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
-  const { metadataStore, synapseClient, localStore, logger } = ctx
+  const { metadataStore, synapseClient, localStore, uploadWorker, logger } = ctx
 
   // ── Upload status: GET /_/status ────────────────────────────────────
   //    Not an S3 API — gateway-specific endpoint for monitoring upload queue.
@@ -119,8 +121,23 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const diskStats = localStore.getDiskStats()
     const multipartCount = metadataStore.countAllMultipartUploads()
     const deletionStats = metadataStore.getDeletionStats()
+    const objectSummary = metadataStore.getObjectSummary()
+    const repairStatus = uploadWorker?.getRepairStatus()
 
     const result: Record<string, unknown> = {
+      objects: {
+        totalFiles: objectSummary.totalFiles,
+        totalBytes: objectSummary.totalBytes,
+        totalSize: formatBytes(objectSummary.totalBytes),
+      },
+      replication: {
+        eligibleFiles: objectSummary.eligibleFiles,
+        compliantFiles: objectSummary.compliantFiles,
+        nonCompliantFiles: objectSummary.nonCompliantFiles,
+        emptyFiles: objectSummary.emptyFiles,
+        repairingFiles: repairStatus?.inProgress ?? 0,
+        coolingDownFiles: repairStatus?.coolingDown ?? 0,
+      },
       uploads: stats,
       deletions: deletionStats,
       disk: {
@@ -136,6 +153,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         },
       },
       multipartUploads: multipartCount,
+    }
+
+    if (repairStatus) {
+      result.repair = repairStatus
     }
 
     // ?detail=true → include object lists for pending/uploading/failed

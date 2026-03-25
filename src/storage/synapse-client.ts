@@ -33,6 +33,8 @@ export interface UploadResult {
   pieceCid: string
   size: number
   copies: CopyInfo[]
+  requestedCopies: number
+  complete: boolean
 }
 
 export class SynapseClient {
@@ -79,13 +81,16 @@ export class SynapseClient {
     return this.warmStorageService
   }
 
-  async upload(data: Uint8Array | ReadableStream<Uint8Array>): Promise<UploadResult> {
+  async upload(
+    data: Uint8Array | ReadableStream<Uint8Array>,
+    options?: { copies?: number | undefined }
+  ): Promise<UploadResult> {
     const synapse = this.getSynapse()
 
     const dataSize = data instanceof Uint8Array ? data.length : undefined
-    this.logger.info({ dataSize: dataSize ?? 'streaming' }, 'uploading to FOC')
+    this.logger.info({ dataSize: dataSize ?? 'streaming', copies: options?.copies ?? 2 }, 'uploading to FOC')
 
-    const result = await synapse.storage.upload(data)
+    const result = await synapse.storage.upload(data, options?.copies ? { copies: options.copies } : undefined)
 
     const copies: CopyInfo[] = result.copies.map((copy) => ({
       providerId: copy.providerId.toString(),
@@ -100,6 +105,7 @@ export class SynapseClient {
         pieceCid: result.pieceCid.toString(),
         size: result.size,
         copies: copies.length,
+        requestedCopies: result.requestedCopies,
         complete: result.complete,
         providers: copies.map((c) => c.providerId),
       },
@@ -110,6 +116,100 @@ export class SynapseClient {
       pieceCid: result.pieceCid.toString(),
       size: result.size,
       copies,
+      requestedCopies: result.requestedCopies,
+      complete: result.complete,
+    }
+  }
+
+  async repairCopies(options: {
+    pieceCid: string
+    sourceCopies: CopyInfo[]
+    excludeProviderIds: string[]
+    additionalCopies: number
+  }): Promise<CopyInfo[]> {
+    const { pieceCid, sourceCopies, excludeProviderIds: excludedIdsRaw, additionalCopies } = options
+    if (sourceCopies.length === 0) {
+      throw new Error('repairCopies requires at least one source copy')
+    }
+    if (additionalCopies <= 0) {
+      return []
+    }
+
+    const synapse = this.getSynapse()
+    const excludeProviderIds = excludedIdsRaw
+      .map((copy) => {
+        try {
+          return BigInt(copy)
+        } catch {
+          return undefined
+        }
+      })
+      .filter((id): id is bigint => id !== undefined)
+    const sourceCopy = sourceCopies.find((c) => c.role === 'primary') ?? sourceCopies[0]
+    if (!sourceCopy) return []
+
+    const contexts = await synapse.storage.createContexts({
+      copies: additionalCopies,
+      excludeProviderIds,
+    })
+
+    const repaired: CopyInfo[] = []
+    for (const context of contexts) {
+      try {
+        const extraData = await context.presignForCommit([{ pieceCid: pieceCid as any }])
+        const pullResult = await context.pull({
+          pieces: [pieceCid as any],
+          from: sourceCopy.retrievalUrl,
+          extraData,
+        })
+        if (pullResult.status !== 'complete') {
+          continue
+        }
+        const commitResult = await context.commit({
+          pieces: [{ pieceCid: pieceCid as any }],
+          extraData,
+        })
+        const pieceId = commitResult.pieceIds[0]
+        if (pieceId === undefined) {
+          continue
+        }
+
+        repaired.push({
+          providerId: context.provider.id.toString(),
+          dataSetId: commitResult.dataSetId.toString(),
+          pieceId: pieceId.toString(),
+          retrievalUrl: context.getPieceUrl(pieceCid as any),
+          role: 'secondary',
+        })
+      } catch (error) {
+        this.logger.warn({ pieceCid, providerId: context.provider.id.toString(), error }, 'copy repair attempt failed')
+      }
+    }
+
+    return repaired
+  }
+
+  async probeCopy(retrievalUrl: string, timeoutMs = 8_000): Promise<boolean> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const head = await fetch(retrievalUrl, { method: 'HEAD', signal: controller.signal })
+      if (head.ok) {
+        return true
+      }
+      if (head.status === 405 || head.status === 501 || head.status === 403) {
+        const get = await fetch(retrievalUrl, {
+          method: 'GET',
+          headers: { Range: 'bytes=0-0' },
+          signal: controller.signal,
+        })
+        return get.ok || get.status === 206
+      }
+      return false
+    } catch {
+      return false
+    } finally {
+      clearTimeout(timer)
     }
   }
 

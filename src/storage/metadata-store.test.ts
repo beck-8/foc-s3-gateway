@@ -113,6 +113,51 @@ describe('MetadataStore', () => {
     })
   })
 
+  describe('desired copies snapshot', () => {
+    it('uses default desired copies when staging', () => {
+      store.stageObject('default', 'a.bin', 256, 'application/octet-stream', 'etag-a', '/tmp/a')
+
+      const pending = store.getPendingUploads(10)
+      expect(pending).toHaveLength(1)
+      expect(pending[0]?.desiredCopies).toBe(2)
+    })
+
+    it('applies new default only to newly staged objects', () => {
+      store.stageObject('default', 'old.bin', 256, 'application/octet-stream', 'etag-old', '/tmp/old')
+      store.setDefaultDesiredCopies(3)
+      store.stageObject('default', 'new.bin', 256, 'application/octet-stream', 'etag-new', '/tmp/new')
+
+      const pending = store.getPendingUploads(10)
+      const oldObj = pending.find((p) => p.key === 'old.bin')
+      const newObj = pending.find((p) => p.key === 'new.bin')
+
+      expect(oldObj?.desiredCopies).toBe(2)
+      expect(newObj?.desiredCopies).toBe(3)
+    })
+
+    it('marks partial upload as uploaded and eligible for repair', () => {
+      store.stageObject('default', 'repair.bin', 256, 'application/octet-stream', 'etag-repair', '/tmp/repair')
+      store.recordPartialUpload('default', 'repair.bin', 'cid-repair', [
+        {
+          providerId: '42',
+          dataSetId: '100',
+          pieceId: '1',
+          retrievalUrl: 'https://sp1.example.com/piece/cid-repair',
+          role: 'primary',
+        },
+      ])
+
+      const obj = store.getObject('default', 'repair.bin')
+      expect(obj?.pieceCid).toBe('cid-repair')
+
+      const candidates = store.getUnderReplicatedObjects(10)
+      const repairItem = candidates.find((c) => c.key === 'repair.bin')
+      expect(repairItem?.desiredCopies).toBe(2)
+      expect(repairItem?.copiesCount).toBe(1)
+      expect(repairItem?.healthyCopies).toBe(1)
+    })
+  })
+
   // ── Object copies ───────────────────────────────────────────────────
 
   describe('putObject with copies / getObjectCopies', () => {

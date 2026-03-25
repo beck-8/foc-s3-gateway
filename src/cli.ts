@@ -23,6 +23,7 @@ program
   .option('-a, --access-key <key>', 'Access key for authentication (or set ACCESS_KEY env)')
   .option('-s, --secret-key <key>', 'Secret key for authentication (or set SECRET_KEY env)')
   .option('-w, --webdav-port <port>', 'WebDAV server port (default: S3 port + 1)')
+  .option('-c, --copies <count>', 'Default desired copies for new uploads (or set COPIES env)', '2')
   .action(async (options) => {
     const privateKey = options.privateKey ?? process.env.PRIVATE_KEY
     if (!privateKey) {
@@ -31,6 +32,13 @@ program
     }
 
     const rpcUrl = options.rpcUrl ?? process.env.RPC_URL ?? getRpcUrl(options.network)
+
+    const copiesRaw = options.copies ?? process.env.COPIES ?? '2'
+    const copies = Number.parseInt(copiesRaw, 10)
+    if (!Number.isInteger(copies) || copies < 1) {
+      console.error(`Error: --copies must be an integer >= 1 (received: ${copiesRaw})`)
+      process.exit(1)
+    }
 
     await startServer({
       port: Number.parseInt(options.port, 10),
@@ -41,6 +49,7 @@ program
       accessKey: options.accessKey ?? process.env.ACCESS_KEY,
       secretKey: options.secretKey ?? process.env.SECRET_KEY,
       webdavPort: options.webdavPort ? Number.parseInt(options.webdavPort, 10) : undefined,
+      copies,
     })
   })
 

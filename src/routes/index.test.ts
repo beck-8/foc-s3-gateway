@@ -47,6 +47,7 @@ describe('S3 Routes', () => {
   let metadataStore: MetadataStore
   let mockSynapse: ReturnType<typeof createMockSynapseClient>
   let localStore: LocalStore
+  let mockUploadWorker: { getRepairStatus: ReturnType<typeof vi.fn> }
   let tempDir: string
 
   beforeEach(async () => {
@@ -56,6 +57,19 @@ describe('S3 Routes', () => {
     metadataStore = new MetadataStore({ dbPath: ':memory:', logger })
     mockSynapse = createMockSynapseClient()
     localStore = new LocalStore({ dataDir: tempDir, logger })
+    mockUploadWorker = {
+      getRepairStatus: vi.fn().mockReturnValue({
+        scanIntervalMs: 5000,
+        probeIntervalMs: 3600000,
+        probeTimeoutMs: 8000,
+        unhealthyFailureThreshold: 24,
+        cooldownMs: 300000,
+        pending: 0,
+        probing: 0,
+        inProgress: 0,
+        coolingDown: 0,
+      }),
+    }
 
     // Disable body parsing so PutObject can read raw
     app.removeAllContentTypeParsers()
@@ -67,6 +81,7 @@ describe('S3 Routes', () => {
       metadataStore,
       synapseClient: mockSynapse as any,
       localStore,
+      uploadWorker: mockUploadWorker as any,
       logger,
     })
   })
@@ -78,6 +93,68 @@ describe('S3 Routes', () => {
   })
 
   // ── ListBuckets: GET / ──────────────────────────────────────────────
+
+  describe('GET /_/status', () => {
+    it('returns repair worker settings', async () => {
+      metadataStore.putObject('default', 'a.bin', 'cid-a', 100, 'application/octet-stream', 'etag-a', [
+        {
+          providerId: '42',
+          dataSetId: '100',
+          pieceId: '1',
+          retrievalUrl: 'https://sp1.example.com/piece/cid-a',
+          role: 'primary',
+        },
+        {
+          providerId: '43',
+          dataSetId: '101',
+          pieceId: '2',
+          retrievalUrl: 'https://sp2.example.com/piece/cid-a',
+          role: 'secondary',
+        },
+      ])
+      metadataStore.putObject({
+        bucket: 'default',
+        key: 'b.bin',
+        pieceCid: 'cid-b',
+        size: 200,
+        contentType: 'application/octet-stream',
+        etag: 'etag-b',
+        desiredCopies: 2,
+        copies: [
+          {
+            providerId: '55',
+            dataSetId: '200',
+            pieceId: '3',
+            retrievalUrl: 'https://sp3.example.com/piece/cid-b',
+            role: 'primary',
+          },
+        ],
+      })
+
+      const response = await app.inject({ method: 'GET', url: '/_/status' })
+      expect(response.statusCode).toBe(200)
+
+      const body = response.json() as Record<string, any>
+      expect(body.objects.totalFiles).toBe(2)
+      expect(body.objects.totalBytes).toBe(300)
+      expect(body.replication.eligibleFiles).toBe(2)
+      expect(body.replication.compliantFiles).toBe(1)
+      expect(body.replication.nonCompliantFiles).toBe(1)
+      expect(body.replication.repairingFiles).toBe(0)
+      expect(body.replication.coolingDownFiles).toBe(0)
+      expect(body.repair).toEqual({
+        scanIntervalMs: 5000,
+        probeIntervalMs: 3600000,
+        probeTimeoutMs: 8000,
+        unhealthyFailureThreshold: 24,
+        cooldownMs: 300000,
+        pending: 0,
+        probing: 0,
+        inProgress: 0,
+        coolingDown: 0,
+      })
+    })
+  })
 
   describe('GET / (ListBuckets)', () => {
     it('returns XML with default bucket', async () => {

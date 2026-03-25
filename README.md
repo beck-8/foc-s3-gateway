@@ -132,8 +132,9 @@ Client ──PUT──→ Gateway ──save──→ Local Disk ──200 OK─
 
 - **Fast response**: PutObject returns in milliseconds (disk I/O only)
 - **Concurrent uploads**: Background worker processes up to 10 files in parallel
-- **Retry on failure**: Failed uploads retry up to 10 times; local file preserved
+- **Retry on failure**: Failed uploads retry up to 10 times
 - **Immediate availability**: Files can be downloaded immediately after upload (served from local disk)
+- **Self-healing replicas**: Background health probes + repair worker automatically refill missing healthy copies
 
 ### Download (Local-First)
 
@@ -169,6 +170,26 @@ curl http://localhost:8333/_/status?detail=true
 **Example response:**
 ```json
 {
+  "objects": { "totalFiles": 120, "totalBytes": 734003200, "totalSize": "700 MB" },
+  "replication": {
+    "eligibleFiles": 118,
+    "compliantFiles": 115,
+    "nonCompliantFiles": 3,
+    "emptyFiles": 2,
+    "repairingFiles": 1,
+    "coolingDownFiles": 1
+  },
+  "repair": {
+    "scanIntervalMs": 5000,
+    "probeIntervalMs": 3600000,
+    "probeTimeoutMs": 8000,
+    "unhealthyFailureThreshold": 24,
+    "cooldownMs": 300000,
+    "pending": 3,
+    "probing": 0,
+    "inProgress": 1,
+    "coolingDown": 1
+  },
   "uploads": { "pending": 3, "uploading": 2, "uploaded": 15, "failed": 1 },
   "disk": {
     "staging": { "files": 6, "totalBytes": 52428800, "totalSize": "50.0 MB" },
@@ -326,6 +347,23 @@ The gateway stores staged files alongside the database:
 | `-a, --access-key` | `ACCESS_KEY` | — | Authentication access key |
 | `-s, --secret-key` | `SECRET_KEY` | — | Authentication secret key |
 | `-w, --webdav-port` | — | S3 port + 1 | WebDAV server port |
+| `-c, --copies` | `COPIES` | `2` | Desired copies for newly uploaded objects |
+
+### Repair & Probe Tunables (Env Only)
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `UPLOAD_SCAN_INTERVAL_MS` | `5000` | Main upload/repair scheduler loop interval |
+| `UPLOAD_CONCURRENCY` | `10` | Max concurrent uploads and repair/probe batch size multiplier |
+| `COPY_PROBE_INTERVAL_MS` | `3600000` | Minimum re-check interval per copy (1 hour) |
+| `COPY_PROBE_TIMEOUT_MS` | `8000` | Timeout per health probe request |
+| `COPY_UNHEALTHY_FAILURE_THRESHOLD` | `24` | Consecutive probe failures before marking copy unhealthy |
+| `REPAIR_COOLDOWN_MS` | `300000` | Per-object cooldown after failed/incomplete repair (5 minutes) |
+
+Notes:
+- A copy in `suspect` / `unhealthy` state does not count as a healthy copy.
+- Repair triggers when healthy copy count is below desired copies.
+- To emulate "24 hours, 24 consecutive failures", keep `COPY_PROBE_INTERVAL_MS=3600000` and `COPY_UNHEALTHY_FAILURE_THRESHOLD=24`.
 
 ## Development
 

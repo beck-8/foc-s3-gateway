@@ -13,7 +13,7 @@ import { CleanupWorker } from './storage/cleanup-worker.js'
 import { LocalStore } from './storage/local-store.js'
 import { MetadataStore } from './storage/metadata-store.js'
 import { SynapseClient } from './storage/synapse-client.js'
-import { UploadWorker } from './storage/upload-worker.js'
+import { UploadWorker, type UploadWorkerOptions } from './storage/upload-worker.js'
 import { startWebDavServer } from './webdav/server.js'
 
 export interface ServerOptions {
@@ -26,6 +26,13 @@ export interface ServerOptions {
   accessKey?: string | undefined
   secretKey?: string | undefined
   webdavPort?: number | undefined
+  copies?: number | undefined
+  scanIntervalMs?: number | undefined
+  uploadConcurrency?: number | undefined
+  probeIntervalMs?: number | undefined
+  probeTimeoutMs?: number | undefined
+  unhealthyFailureThreshold?: number | undefined
+  repairCooldownMs?: number | undefined
 }
 
 export async function createServer(options: ServerOptions) {
@@ -55,6 +62,9 @@ export async function createServer(options: ServerOptions) {
 
   // Initialize storage
   const metadataStore = new MetadataStore({ dbPath, logger })
+  const desiredCopies = options.copies ?? 2
+  metadataStore.setDefaultDesiredCopies(desiredCopies)
+  logger.info({ desiredCopies }, 'configured default desired copies for new uploads')
   const synapseClient = new SynapseClient({
     privateKey: options.privateKey,
     rpcUrl: options.rpcUrl,
@@ -95,11 +105,34 @@ export async function createServer(options: ServerOptions) {
     logger.warn('no access key / secret key configured -- running WITHOUT authentication')
   }
 
-  // Register S3 routes
-  registerRoutes(app, { metadataStore, synapseClient, localStore, logger })
-
   const cleanupWorker = new CleanupWorker({ metadataStore, synapseClient, logger })
-  const uploadWorker = new UploadWorker({ metadataStore, synapseClient, localStore, logger })
+  const uploadWorkerOptions: UploadWorkerOptions = {
+    metadataStore,
+    synapseClient,
+    localStore,
+    logger,
+  }
+  const scanIntervalMs = options.scanIntervalMs ?? readPositiveIntEnv('UPLOAD_SCAN_INTERVAL_MS')
+  const uploadConcurrency = options.uploadConcurrency ?? readPositiveIntEnv('UPLOAD_CONCURRENCY')
+  const probeIntervalMs = options.probeIntervalMs ?? readPositiveIntEnv('COPY_PROBE_INTERVAL_MS')
+  const probeTimeoutMs = options.probeTimeoutMs ?? readPositiveIntEnv('COPY_PROBE_TIMEOUT_MS')
+  const unhealthyFailureThreshold =
+    options.unhealthyFailureThreshold ?? readPositiveIntEnv('COPY_UNHEALTHY_FAILURE_THRESHOLD')
+  const repairCooldownMs = options.repairCooldownMs ?? readPositiveIntEnv('REPAIR_COOLDOWN_MS')
+
+  if (scanIntervalMs !== undefined) uploadWorkerOptions.intervalMs = scanIntervalMs
+  if (uploadConcurrency !== undefined) uploadWorkerOptions.concurrency = uploadConcurrency
+  if (probeIntervalMs !== undefined) uploadWorkerOptions.probeIntervalMs = probeIntervalMs
+  if (probeTimeoutMs !== undefined) uploadWorkerOptions.probeTimeoutMs = probeTimeoutMs
+  if (unhealthyFailureThreshold !== undefined) {
+    uploadWorkerOptions.unhealthyFailureThreshold = unhealthyFailureThreshold
+  }
+  if (repairCooldownMs !== undefined) uploadWorkerOptions.repairCooldownMs = repairCooldownMs
+
+  const uploadWorker = new UploadWorker(uploadWorkerOptions)
+
+  // Register S3 routes
+  registerRoutes(app, { metadataStore, synapseClient, localStore, uploadWorker, logger })
 
   // Clean up orphaned staging files on startup
   const knownPaths = metadataStore.getAllLocalPaths()
@@ -169,4 +202,15 @@ function getDefaultDbPath(): string {
       // Linux / other — follow XDG Base Directory spec
       return path.join(process.env.XDG_DATA_HOME ?? path.join(homedir(), '.local', 'share'), appName, 'metadata.db')
   }
+}
+
+function readPositiveIntEnv(name: string): number | undefined {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return undefined
+
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be an integer >= 1 (received: ${raw})`)
+  }
+  return parsed
 }

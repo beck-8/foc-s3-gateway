@@ -22,12 +22,14 @@ export interface PutObjectOptions {
   size: number
   contentType: string
   etag: string
+  desiredCopies?: number | undefined
   copies?: CopyInfo[] | undefined
 }
 
 export class MetadataStore {
   private readonly db: Database.Database
   private readonly logger: Logger
+  private static readonly DEFAULT_DESIRED_COPIES_KEY = 'default_desired_copies'
 
   constructor(options: MetadataStoreOptions) {
     this.logger = options.logger.child({ module: 'metadata-store' })
@@ -56,6 +58,7 @@ export class MetadataStore {
         content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
         etag TEXT NOT NULL,
         copies_count INTEGER NOT NULL DEFAULT 0,
+        desired_copies INTEGER NOT NULL DEFAULT 2,
         status TEXT NOT NULL DEFAULT 'uploaded',
         local_path TEXT,
         upload_attempts INTEGER NOT NULL DEFAULT 0,
@@ -73,6 +76,10 @@ export class MetadataStore {
         piece_id TEXT NOT NULL,
         retrieval_url TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'primary',
+        health_status TEXT NOT NULL DEFAULT 'healthy',
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_checked_at TEXT,
+        last_success_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (bucket, key, provider_id)
       );
@@ -152,6 +159,36 @@ export class MetadataStore {
       this.db.exec('ALTER TABLE objects ADD COLUMN upload_attempts INTEGER NOT NULL DEFAULT 0')
       this.logger.info('migrated: added upload_attempts column to objects')
     }
+    if (!colNames.has('desired_copies')) {
+      this.db.exec('ALTER TABLE objects ADD COLUMN desired_copies INTEGER NOT NULL DEFAULT 2')
+      this.logger.info('migrated: added desired_copies column to objects')
+    }
+
+    const copyColumns = this.db.prepare("SELECT name FROM pragma_table_info('object_copies')").all() as Array<{
+      name: string
+    }>
+    const copyColNames = new Set(copyColumns.map((c) => c.name))
+    if (!copyColNames.has('health_status')) {
+      this.db.exec("ALTER TABLE object_copies ADD COLUMN health_status TEXT NOT NULL DEFAULT 'healthy'")
+      this.db.exec(
+        "UPDATE object_copies SET health_status = 'healthy' WHERE health_status IS NULL OR health_status = ''"
+      )
+      this.logger.info('migrated: added health_status column to object_copies')
+    }
+    if (!copyColNames.has('consecutive_failures')) {
+      this.db.exec('ALTER TABLE object_copies ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0')
+      this.logger.info('migrated: added consecutive_failures column to object_copies')
+    }
+    if (!copyColNames.has('last_checked_at')) {
+      this.db.exec('ALTER TABLE object_copies ADD COLUMN last_checked_at TEXT')
+      this.db.exec("UPDATE object_copies SET last_checked_at = datetime('now') WHERE last_checked_at IS NULL")
+      this.logger.info('migrated: added last_checked_at column to object_copies')
+    }
+    if (!copyColNames.has('last_success_at')) {
+      this.db.exec('ALTER TABLE object_copies ADD COLUMN last_success_at TEXT')
+      this.db.exec("UPDATE object_copies SET last_success_at = datetime('now') WHERE last_success_at IS NULL")
+      this.logger.info('migrated: added last_success_at column to object_copies')
+    }
   }
 
   // ── Config / Identity ─────────────────────────────────────────────
@@ -165,6 +202,26 @@ export class MetadataStore {
   /** Set a config value */
   setConfig(key: string, value: string): void {
     this.db.prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)').run(key, value)
+  }
+
+  setDefaultDesiredCopies(copies: number): void {
+    const value = this.normalizeDesiredCopies(copies)
+    this.setConfig(MetadataStore.DEFAULT_DESIRED_COPIES_KEY, String(value))
+  }
+
+  private getDefaultDesiredCopies(): number {
+    const raw = this.getConfig(MetadataStore.DEFAULT_DESIRED_COPIES_KEY)
+    if (!raw) return 2
+    const parsed = Number.parseInt(raw, 10)
+    if (!Number.isFinite(parsed) || parsed < 1) return 2
+    return parsed
+  }
+
+  private normalizeDesiredCopies(copies: number): number {
+    if (!Number.isInteger(copies) || copies < 1) {
+      throw new Error(`desired copies must be an integer >= 1 (received: ${copies})`)
+    }
+    return copies
   }
 
   /**
@@ -262,6 +319,7 @@ export class MetadataStore {
     let sz: number
     let ct: string
     let et: string
+    let dc: number | undefined
     let cp: CopyInfo[] | undefined
 
     if (typeof bucketOrOptions === 'object') {
@@ -271,6 +329,7 @@ export class MetadataStore {
       sz = bucketOrOptions.size
       ct = bucketOrOptions.contentType
       et = bucketOrOptions.etag
+      dc = bucketOrOptions.desiredCopies
       cp = bucketOrOptions.copies
     } else {
       if (
@@ -288,20 +347,23 @@ export class MetadataStore {
       sz = size
       ct = contentType
       et = etag
+      dc = undefined
       cp = copies
     }
 
+    const desiredCopies = this.normalizeDesiredCopies(dc ?? this.getDefaultDesiredCopies())
     const copiesCount = cp?.length ?? 0
 
     const putStmt = this.db.prepare(`
-      INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, status, local_path, upload_attempts, updated_at, deleted)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'uploaded', NULL, 0, datetime('now'), 0)
+      INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, status, local_path, upload_attempts, updated_at, deleted)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', NULL, 0, datetime('now'), 0)
       ON CONFLICT (bucket, key) DO UPDATE SET
         piece_cid = excluded.piece_cid,
         size = excluded.size,
         content_type = excluded.content_type,
         etag = excluded.etag,
         copies_count = excluded.copies_count,
+        desired_copies = excluded.desired_copies,
         status = 'uploaded',
         local_path = NULL,
         upload_attempts = 0,
@@ -347,15 +409,17 @@ export class MetadataStore {
         }
       }
 
-      putStmt.run(bucket, k, pc, sz, ct, et, copiesCount)
+      putStmt.run(bucket, k, pc, sz, ct, et, copiesCount, desiredCopies)
 
       // Replace copy records if provided
       if (cp && cp.length > 0) {
         this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, k)
 
         const insertCopy = this.db.prepare(`
-          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO object_copies (
+            bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role, health_status, consecutive_failures, last_checked_at, last_success_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'healthy', 0, datetime('now'), datetime('now'))
         `)
         for (const copy of cp) {
           insertCopy.run(bucket, k, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
@@ -570,6 +634,10 @@ export class MetadataStore {
     const src = this.getObject(srcBucket, srcKey)
     if (!src) return undefined
     if (!this.bucketExists(dstBucket)) return undefined
+    const srcDesiredCopiesRow = this.db
+      .prepare('SELECT desired_copies FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
+      .get(srcBucket, srcKey) as { desired_copies: number } | undefined
+    const srcDesiredCopies = srcDesiredCopiesRow?.desired_copies ?? 2
 
     const srcCopies = this.getObjectCopies(srcBucket, srcKey)
 
@@ -613,25 +681,28 @@ export class MetadataStore {
       // Insert/replace destination object with same pieceCid
       this.db
         .prepare(`
-        INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, updated_at, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
+        INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, updated_at, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
         ON CONFLICT (bucket, key) DO UPDATE SET
           piece_cid = excluded.piece_cid,
           size = excluded.size,
           content_type = excluded.content_type,
           etag = excluded.etag,
           copies_count = excluded.copies_count,
+          desired_copies = excluded.desired_copies,
           updated_at = datetime('now'),
           deleted = 0
       `)
-        .run(dstBucket, dstKey, src.pieceCid, src.size, src.contentType, src.etag, srcCopies.length)
+        .run(dstBucket, dstKey, src.pieceCid, src.size, src.contentType, src.etag, srcCopies.length, srcDesiredCopies)
 
       // Copy provider records
       if (srcCopies.length > 0) {
         this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(dstBucket, dstKey)
         const insertCopy = this.db.prepare(`
-          INSERT INTO object_copies (bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO object_copies (
+            bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role, health_status, consecutive_failures, last_checked_at, last_success_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'healthy', 0, datetime('now'), datetime('now'))
         `)
         for (const copy of srcCopies) {
           insertCopy.run(dstBucket, dstKey, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
@@ -657,7 +728,17 @@ export class MetadataStore {
   // ── Async upload operations ─────────────────────────────────────────
 
   /** Stage an object for async FOC upload (returns immediately, worker uploads later) */
-  stageObject(bucket: string, key: string, size: number, contentType: string, etag: string, localPath: string): void {
+  stageObject(
+    bucket: string,
+    key: string,
+    size: number,
+    contentType: string,
+    etag: string,
+    localPath: string,
+    desiredCopies?: number
+  ): void {
+    const snapshotDesiredCopies = this.normalizeDesiredCopies(desiredCopies ?? this.getDefaultDesiredCopies())
+
     const transaction = this.db.transaction(() => {
       // Check if an existing object has FOC copies that need cleanup
       const existing = this.db
@@ -703,21 +784,22 @@ export class MetadataStore {
       // Upsert the new object
       this.db
         .prepare(
-          `INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, status, local_path, upload_attempts, updated_at, deleted)
-           VALUES (?, ?, '', ?, ?, ?, 0, 'pending', ?, 0, datetime('now'), 0)
+          `INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, status, local_path, upload_attempts, updated_at, deleted)
+           VALUES (?, ?, '', ?, ?, ?, 0, ?, 'pending', ?, 0, datetime('now'), 0)
            ON CONFLICT (bucket, key) DO UPDATE SET
              piece_cid = '',
              size = excluded.size,
              content_type = excluded.content_type,
              etag = excluded.etag,
              copies_count = 0,
+             desired_copies = excluded.desired_copies,
              status = 'pending',
              local_path = excluded.local_path,
              upload_attempts = 0,
              updated_at = datetime('now'),
              deleted = 0`
         )
-        .run(bucket, key, size, contentType, etag, localPath)
+        .run(bucket, key, size, contentType, etag, snapshotDesiredCopies, localPath)
     })
 
     transaction()
@@ -731,10 +813,11 @@ export class MetadataStore {
     size: number
     contentType: string
     localPath: string
+    desiredCopies: number
   }> {
     return this.db
       .prepare(
-        `SELECT bucket, key, size, content_type as contentType, local_path as localPath
+        `SELECT bucket, key, size, content_type as contentType, local_path as localPath, desired_copies as desiredCopies
          FROM objects
          WHERE status IN ('pending', 'failed') AND deleted = 0
            AND upload_attempts < 10
@@ -769,8 +852,10 @@ export class MetadataStore {
       if (copies && copies.length > 0) {
         this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, key)
         const insertCopy = this.db.prepare(
-          `INSERT INTO object_copies (bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO object_copies (
+             bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role, health_status, consecutive_failures, last_checked_at, last_success_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'healthy', 0, datetime('now'), datetime('now'))`
         )
         for (const copy of copies) {
           insertCopy.run(bucket, key, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
@@ -780,6 +865,221 @@ export class MetadataStore {
 
     transaction()
     this.logger.debug({ bucket, key, pieceCid, copies: copiesCount }, 'upload completed')
+  }
+
+  /** Record copies from a partial upload and keep object readable while awaiting repair */
+  recordPartialUpload(bucket: string, key: string, pieceCid: string, copies: CopyInfo[], localPath?: string): void {
+    const copiesCount = copies.length
+
+    const transaction = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE objects
+           SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = ?, updated_at = datetime('now')
+           WHERE bucket = ? AND key = ? AND deleted = 0`
+        )
+        .run(pieceCid, copiesCount, localPath ?? null, bucket, key)
+
+      this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(bucket, key)
+      const insertCopy = this.db.prepare(
+        `INSERT INTO object_copies (
+           bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role, health_status, consecutive_failures, last_checked_at, last_success_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'healthy', 0, datetime('now'), datetime('now'))`
+      )
+      for (const copy of copies) {
+        insertCopy.run(bucket, key, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
+      }
+    })
+
+    transaction()
+    this.logger.warn({ bucket, key, pieceCid, copies: copiesCount }, 'partial upload recorded, waiting for repair')
+  }
+
+  getUnderReplicatedObjects(limit = 5): Array<{
+    bucket: string
+    key: string
+    pieceCid: string
+    desiredCopies: number
+    copiesCount: number
+    healthyCopies: number
+  }> {
+    return this.db
+      .prepare(
+        `SELECT
+           o.bucket,
+           o.key,
+           o.piece_cid as pieceCid,
+           o.desired_copies as desiredCopies,
+           o.copies_count as copiesCount,
+           (
+             SELECT COUNT(*)
+             FROM object_copies c
+             WHERE c.bucket = o.bucket AND c.key = o.key AND c.health_status = 'healthy'
+           ) as healthyCopies
+         FROM objects o
+         WHERE o.deleted = 0
+           AND o.status = 'uploaded'
+           AND o.piece_cid != ''
+           AND (
+             SELECT COUNT(*)
+             FROM object_copies c
+             WHERE c.bucket = o.bucket AND c.key = o.key AND c.health_status = 'healthy'
+           ) < o.desired_copies
+         ORDER BY o.updated_at ASC
+         LIMIT ?`
+      )
+      .all(limit) as any
+  }
+
+  getUnderReplicatedCount(): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) as count
+         FROM objects
+         WHERE deleted = 0
+           AND status = 'uploaded'
+           AND piece_cid != ''
+           AND (
+             SELECT COUNT(*)
+             FROM object_copies c
+             WHERE c.bucket = objects.bucket AND c.key = objects.key AND c.health_status = 'healthy'
+           ) < desired_copies`
+      )
+      .get() as { count: number }
+    return row.count
+  }
+
+  getHealthyObjectCopies(bucket: string, key: string): CopyInfo[] {
+    const rows = this.db
+      .prepare(`
+      SELECT provider_id as providerId, data_set_id as dataSetId, piece_id as pieceId, retrieval_url as retrievalUrl, role
+      FROM object_copies
+      WHERE bucket = ? AND key = ? AND health_status = 'healthy'
+      ORDER BY role ASC
+    `)
+      .all(bucket, key)
+    return rows as CopyInfo[]
+  }
+
+  getCopyProbeCandidates(
+    limit: number,
+    probeIntervalMs: number
+  ): Array<{ bucket: string; key: string; providerId: string; retrievalUrl: string }> {
+    const seconds = Math.max(1, Math.floor(probeIntervalMs / 1000))
+    return this.db
+      .prepare(
+        `SELECT c.bucket as bucket, c.key as key, c.provider_id as providerId, c.retrieval_url as retrievalUrl
+         FROM object_copies c
+         JOIN objects o ON o.bucket = c.bucket AND o.key = c.key
+         WHERE o.deleted = 0
+           AND o.status = 'uploaded'
+           AND (c.last_checked_at IS NULL OR c.last_checked_at < datetime('now', ?))
+         ORDER BY c.last_checked_at ASC
+         LIMIT ?`
+      )
+      .all(`-${seconds} seconds`, limit) as any
+  }
+
+  recordCopyProbeSuccess(bucket: string, key: string, providerId: string): void {
+    this.db
+      .prepare(
+        `UPDATE object_copies
+         SET health_status = 'healthy',
+             consecutive_failures = 0,
+             last_checked_at = datetime('now'),
+             last_success_at = datetime('now')
+         WHERE bucket = ? AND key = ? AND provider_id = ?`
+      )
+      .run(bucket, key, providerId)
+  }
+
+  recordCopyProbeFailure(bucket: string, key: string, providerId: string, unhealthyFailureThreshold = 24): void {
+    const threshold = Math.max(1, Math.floor(unhealthyFailureThreshold))
+    this.db
+      .prepare(
+        `UPDATE object_copies
+         SET consecutive_failures = consecutive_failures + 1,
+             health_status = CASE
+               WHEN consecutive_failures + 1 >= ? THEN 'unhealthy'
+               ELSE 'suspect'
+             END,
+             last_checked_at = datetime('now')
+         WHERE bucket = ? AND key = ? AND provider_id = ?`
+      )
+      .run(threshold, bucket, key, providerId)
+  }
+
+  getObjectSummary(): {
+    totalFiles: number
+    totalBytes: number
+    emptyFiles: number
+    eligibleFiles: number
+    compliantFiles: number
+    nonCompliantFiles: number
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) as totalFiles,
+           COALESCE(SUM(o.size), 0) as totalBytes,
+           SUM(CASE WHEN o.size = 0 THEN 1 ELSE 0 END) as emptyFiles,
+           SUM(CASE WHEN o.piece_cid != '' THEN 1 ELSE 0 END) as eligibleFiles,
+           SUM(CASE WHEN o.piece_cid != '' AND COALESCE(h.healthy_count, 0) >= o.desired_copies THEN 1 ELSE 0 END) as compliantFiles,
+           SUM(CASE WHEN o.piece_cid != '' AND COALESCE(h.healthy_count, 0) < o.desired_copies THEN 1 ELSE 0 END) as nonCompliantFiles
+         FROM objects o
+         LEFT JOIN (
+           SELECT bucket, key, SUM(CASE WHEN health_status = 'healthy' THEN 1 ELSE 0 END) as healthy_count
+           FROM object_copies
+           GROUP BY bucket, key
+         ) h ON h.bucket = o.bucket AND h.key = o.key
+         WHERE o.deleted = 0`
+      )
+      .get() as {
+      totalFiles: number
+      totalBytes: number
+      emptyFiles: number | null
+      eligibleFiles: number | null
+      compliantFiles: number | null
+      nonCompliantFiles: number | null
+    }
+
+    return {
+      totalFiles: row.totalFiles,
+      totalBytes: row.totalBytes,
+      emptyFiles: row.emptyFiles ?? 0,
+      eligibleFiles: row.eligibleFiles ?? 0,
+      compliantFiles: row.compliantFiles ?? 0,
+      nonCompliantFiles: row.nonCompliantFiles ?? 0,
+    }
+  }
+
+  updateObjectCopies(bucket: string, key: string, pieceCid: string, copies: CopyInfo[]): void {
+    const transaction = this.db.transaction(() => {
+      const insertCopy = this.db.prepare(
+        `INSERT OR REPLACE INTO object_copies (
+           bucket, key, provider_id, data_set_id, piece_id, retrieval_url, role, health_status, consecutive_failures, last_checked_at, last_success_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'healthy', 0, datetime('now'), datetime('now'))`
+      )
+      for (const copy of copies) {
+        insertCopy.run(bucket, key, copy.providerId, copy.dataSetId, copy.pieceId, copy.retrievalUrl, copy.role)
+      }
+
+      const row = this.db
+        .prepare('SELECT COUNT(*) as count FROM object_copies WHERE bucket = ? AND key = ?')
+        .get(bucket, key) as { count: number }
+
+      this.db
+        .prepare(
+          `UPDATE objects
+           SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, updated_at = datetime('now')
+           WHERE bucket = ? AND key = ? AND deleted = 0`
+        )
+        .run(pieceCid, row.count, bucket, key)
+    })
+
+    transaction()
   }
 
   /** Mark an upload as failed (will be retried by worker) */
