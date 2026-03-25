@@ -123,9 +123,13 @@ export class UploadWorker {
   private async uploadOne(item: PendingItem): Promise<boolean> {
     const { bucket, key, localPath, desiredCopies } = item
 
+    this.activeCount++
+    this.metadataStore.markUploading(bucket, key)
+
     if (!this.localStore.exists(localPath)) {
       this.logger.warn({ bucket, key, localPath }, 'local file missing, marking failed')
       this.metadataStore.markUploadFailed(bucket, key)
+      this.activeCount--
       return false
     }
 
@@ -137,12 +141,11 @@ export class UploadWorker {
         'file exceeds maximum upload size, marking failed'
       )
       this.metadataStore.markUploadFailed(bucket, key)
+      this.activeCount--
       return false
     }
 
-    this.activeCount++
     try {
-      this.metadataStore.markUploading(bucket, key)
       this.logger.info({ bucket, key, size: item.size }, 'uploading to FOC')
 
       // Create a web ReadableStream from the local file
