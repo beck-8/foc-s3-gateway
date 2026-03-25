@@ -437,6 +437,20 @@ describe('S3 Routes', () => {
       expect(metadataStore.getObject('default', 'to-query.txt')?.pieceCid).toBe('cid-query')
     })
 
+    it('accepts URL-encoded slash in x-amz-copy-source values', async () => {
+      metadataStore.putObject('default', 'from-encoded.txt', 'cid-encoded', 42, 'text/plain', 'etag-encoded')
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/default/to-encoded.txt',
+        headers: { 'x-amz-copy-source': 'default%2Ffrom-encoded.txt' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('<CopyObjectResult>')
+      expect(metadataStore.getObject('default', 'to-encoded.txt')?.pieceCid).toBe('cid-encoded')
+    })
+
     it('returns 404 for non-existent source', async () => {
       const response = await app.inject({
         method: 'PUT',

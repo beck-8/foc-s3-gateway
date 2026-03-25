@@ -88,7 +88,16 @@ function parseCopySource(copySource: string): { bucket: string; key: string } | 
     normalized = normalized.slice(1)
   }
 
-  const slashIdx = normalized.indexOf('/')
+  let slashIdx = normalized.indexOf('/')
+  if (slashIdx < 0) {
+    // Some clients encode the full source path (e.g. "bucket%2Fkey")
+    try {
+      normalized = decodeURIComponent(normalized)
+      slashIdx = normalized.indexOf('/')
+    } catch {
+      return undefined
+    }
+  }
   if (slashIdx < 0) {
     return undefined
   }
