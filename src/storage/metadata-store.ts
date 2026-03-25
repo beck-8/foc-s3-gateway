@@ -1054,6 +1054,73 @@ export class MetadataStore {
     }
   }
 
+  getCopyHealthSummary(): {
+    eligibleFiles: number
+    healthyFiles: number
+    suspectFiles: number
+    unhealthyFiles: number
+    failedFiles: number
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) as eligibleFiles,
+           SUM(
+             CASE
+               WHEN healthyCount >= desiredCopies AND suspectCount = 0 AND unhealthyCount = 0 THEN 1
+               ELSE 0
+             END
+           ) as healthyFiles,
+           SUM(
+             CASE
+               WHEN healthyCount >= desiredCopies AND (suspectCount > 0 OR unhealthyCount > 0) THEN 1
+               ELSE 0
+             END
+           ) as suspectFiles,
+           SUM(
+             CASE
+               WHEN healthyCount > 0 AND healthyCount < desiredCopies THEN 1
+               ELSE 0
+             END
+           ) as unhealthyFiles,
+           SUM(
+             CASE
+               WHEN healthyCount = 0 THEN 1
+               ELSE 0
+             END
+           ) as failedFiles
+         FROM (
+           SELECT
+             o.bucket,
+             o.key,
+             o.desired_copies as desiredCopies,
+             COALESCE(SUM(CASE WHEN c.health_status = 'healthy' THEN 1 ELSE 0 END), 0) as healthyCount,
+             COALESCE(SUM(CASE WHEN c.health_status = 'suspect' THEN 1 ELSE 0 END), 0) as suspectCount,
+             COALESCE(SUM(CASE WHEN c.health_status = 'unhealthy' THEN 1 ELSE 0 END), 0) as unhealthyCount
+           FROM objects o
+           LEFT JOIN object_copies c ON c.bucket = o.bucket AND c.key = o.key
+           WHERE o.deleted = 0
+             AND o.piece_cid != ''
+           GROUP BY o.bucket, o.key
+         )`
+      )
+      .get() as {
+      eligibleFiles: number
+      healthyFiles: number | null
+      suspectFiles: number | null
+      unhealthyFiles: number | null
+      failedFiles: number | null
+    }
+
+    return {
+      eligibleFiles: row.eligibleFiles,
+      healthyFiles: row.healthyFiles ?? 0,
+      suspectFiles: row.suspectFiles ?? 0,
+      unhealthyFiles: row.unhealthyFiles ?? 0,
+      failedFiles: row.failedFiles ?? 0,
+    }
+  }
+
   updateObjectCopies(bucket: string, key: string, pieceCid: string, copies: CopyInfo[]): void {
     const transaction = this.db.transaction(() => {
       const insertCopy = this.db.prepare(

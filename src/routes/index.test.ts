@@ -138,8 +138,10 @@ describe('S3 Routes', () => {
       expect(body.objects.totalFiles).toBe(2)
       expect(body.objects.totalBytes).toBe(300)
       expect(body.replication.eligibleFiles).toBe(2)
-      expect(body.replication.compliantFiles).toBe(1)
-      expect(body.replication.nonCompliantFiles).toBe(1)
+      expect(body.replication.healthyFiles).toBe(1)
+      expect(body.replication.suspectFiles).toBe(0)
+      expect(body.replication.unhealthyFiles).toBe(1)
+      expect(body.replication.failedFiles).toBe(0)
       expect(body.replication.repairingFiles).toBe(0)
       expect(body.replication.coolingDownFiles).toBe(0)
       expect(body.repair).toEqual({

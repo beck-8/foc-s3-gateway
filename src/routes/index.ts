@@ -122,6 +122,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const multipartCount = metadataStore.countAllMultipartUploads()
     const deletionStats = metadataStore.getDeletionStats()
     const objectSummary = metadataStore.getObjectSummary()
+    const copyHealth = metadataStore.getCopyHealthSummary()
     const repairStatus = uploadWorker?.getRepairStatus()
 
     const result: Record<string, unknown> = {
@@ -131,9 +132,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         totalSize: formatBytes(objectSummary.totalBytes),
       },
       replication: {
-        eligibleFiles: objectSummary.eligibleFiles,
-        compliantFiles: objectSummary.compliantFiles,
-        nonCompliantFiles: objectSummary.nonCompliantFiles,
+        eligibleFiles: copyHealth.eligibleFiles,
+        healthyFiles: copyHealth.healthyFiles,
+        suspectFiles: copyHealth.suspectFiles,
+        unhealthyFiles: copyHealth.unhealthyFiles,
+        failedFiles: copyHealth.failedFiles,
         emptyFiles: objectSummary.emptyFiles,
         repairingFiles: repairStatus?.inProgress ?? 0,
         coolingDownFiles: repairStatus?.coolingDown ?? 0,
