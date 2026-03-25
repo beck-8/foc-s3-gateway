@@ -123,7 +123,6 @@ export class MetadataStore {
       CREATE INDEX IF NOT EXISTS idx_objects_prefix ON objects(bucket, key);
       CREATE INDEX IF NOT EXISTS idx_objects_piece_cid ON objects(piece_cid);
       CREATE INDEX IF NOT EXISTS idx_copies_piece ON object_copies(bucket, key);
-      CREATE INDEX IF NOT EXISTS idx_copies_last_checked ON object_copies(last_checked_at, bucket, key);
       CREATE INDEX IF NOT EXISTS idx_pending_piece_cid ON pending_deletions(piece_cid);
       CREATE INDEX IF NOT EXISTS idx_multipart_bucket ON multipart_uploads(bucket, key);
     `)
@@ -135,6 +134,7 @@ export class MetadataStore {
     // Indexes on columns added by migration (safe to create after migrateSchema)
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_objects_status ON objects(status);
+      CREATE INDEX IF NOT EXISTS idx_copies_last_checked ON object_copies(last_checked_at, bucket, key);
     `)
 
     // Ensure default bucket always exists
