@@ -308,6 +308,52 @@ describe('MetadataStore', () => {
       expect(result).toBeUndefined()
       expect(store.getObject('missing-bucket', 'dst.txt')).toBeUndefined()
     })
+
+    it('preserves pending status and local_path for staged objects', () => {
+      store.stageObject('default', 'pending.bin', 256, 'application/octet-stream', 'etag-p', '/tmp/staging/abc123')
+
+      const result = store.copyObject('default', 'pending.bin', 'default', 'renamed.bin')
+
+      expect(result).toBeDefined()
+      expect(store.getLocalPath('default', 'renamed.bin')).toBe('/tmp/staging/abc123')
+    })
+
+    it('clears source local_path after copy (file ownership transfers to destination)', () => {
+      store.stageObject('default', 'original.bin', 256, 'application/octet-stream', 'etag-o', '/tmp/staging/def456')
+
+      store.copyObject('default', 'original.bin', 'default', 'copy.bin')
+
+      expect(store.getLocalPath('default', 'original.bin')).toBeUndefined()
+      expect(store.getLocalPath('default', 'copy.bin')).toBe('/tmp/staging/def456')
+    })
+
+    it('MOVE simulation: copy + delete for pending object preserves downloadability', () => {
+      store.stageObject('default', 'before.bin', 256, 'application/octet-stream', 'etag-m', '/tmp/staging/move123')
+
+      // Simulate MOVE = copy + delete
+      store.copyObject('default', 'before.bin', 'default', 'after.bin')
+      store.deleteObject('default', 'before.bin')
+
+      // Source is gone
+      expect(store.getObject('default', 'before.bin')).toBeUndefined()
+
+      // Destination has the file
+      const obj = store.getObject('default', 'after.bin')
+      expect(obj).toBeDefined()
+      expect(obj?.size).toBe(256)
+      expect(store.getLocalPath('default', 'after.bin')).toBe('/tmp/staging/move123')
+    })
+
+    it('pending object appears in getPendingUploads after copy (UploadWorker can pick it up)', () => {
+      store.stageObject('default', 'upload-me.bin', 256, 'application/octet-stream', 'etag-u', '/tmp/staging/upload1')
+
+      store.copyObject('default', 'upload-me.bin', 'default', 'renamed-upload.bin')
+      store.deleteObject('default', 'upload-me.bin')
+
+      const pending = store.getPendingUploads(10)
+      expect(pending.some((p) => p.key === 'renamed-upload.bin')).toBe(true)
+      expect(pending.some((p) => p.key === 'upload-me.bin')).toBe(false)
+    })
   })
 
   // ── Basic CRUD ──────────────────────────────────────────────────────

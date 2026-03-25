@@ -635,10 +635,19 @@ export class MetadataStore {
     const src = this.getObject(srcBucket, srcKey)
     if (!src) return undefined
     if (!this.bucketExists(dstBucket)) return undefined
-    const srcDesiredCopiesRow = this.db
-      .prepare('SELECT desired_copies FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
-      .get(srcBucket, srcKey) as { desired_copies: number } | undefined
-    const srcDesiredCopies = srcDesiredCopiesRow?.desired_copies ?? 2
+
+    // Fetch full source row including upload state fields (status, local_path, upload_attempts)
+    const srcFull = this.db
+      .prepare(
+        'SELECT desired_copies, status, local_path, upload_attempts FROM objects WHERE bucket = ? AND key = ? AND deleted = 0'
+      )
+      .get(srcBucket, srcKey) as
+      | { desired_copies: number; status: string | null; local_path: string | null; upload_attempts: number }
+      | undefined
+    const srcDesiredCopies = srcFull?.desired_copies ?? 2
+    const srcStatus = srcFull?.status ?? 'uploaded'
+    const srcLocalPath = srcFull?.local_path ?? null
+    const srcUploadAttempts = srcFull?.upload_attempts ?? 0
 
     const srcCopies = this.getObjectCopies(srcBucket, srcKey)
 
@@ -679,11 +688,11 @@ export class MetadataStore {
         }
       }
 
-      // Insert/replace destination object with same pieceCid
+      // Insert/replace destination object — preserve upload state (status, local_path, upload_attempts)
       this.db
         .prepare(`
-        INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, updated_at, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
+        INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, status, local_path, upload_attempts, updated_at, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
         ON CONFLICT (bucket, key) DO UPDATE SET
           piece_cid = excluded.piece_cid,
           size = excluded.size,
@@ -691,10 +700,32 @@ export class MetadataStore {
           etag = excluded.etag,
           copies_count = excluded.copies_count,
           desired_copies = excluded.desired_copies,
+          status = excluded.status,
+          local_path = excluded.local_path,
+          upload_attempts = excluded.upload_attempts,
           updated_at = datetime('now'),
           deleted = 0
       `)
-        .run(dstBucket, dstKey, src.pieceCid, src.size, src.contentType, src.etag, srcCopies.length, srcDesiredCopies)
+        .run(
+          dstBucket,
+          dstKey,
+          src.pieceCid,
+          src.size,
+          src.contentType,
+          src.etag,
+          srcCopies.length,
+          srcDesiredCopies,
+          srcStatus,
+          srcLocalPath,
+          srcUploadAttempts
+        )
+
+      // Transfer local file ownership: clear source local_path so only destination owns the file
+      if (srcLocalPath) {
+        this.db
+          .prepare('UPDATE objects SET local_path = NULL WHERE bucket = ? AND key = ? AND deleted = 0')
+          .run(srcBucket, srcKey)
+      }
 
       // Copy provider records
       if (srcCopies.length > 0) {
