@@ -270,7 +270,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       .header('Content-Length', obj.size)
       .header('ETag', `"${obj.etag}"`)
       .header('Last-Modified', new Date(obj.lastModified).toUTCString())
-      .header('Accept-Ranges', 'bytes')
       .send()
   })
 
@@ -360,7 +359,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           'Content-Length': obj.size,
           ETag: `"${obj.etag}"`,
           'Last-Modified': new Date(obj.lastModified).toUTCString(),
-          'Accept-Ranges': 'bytes',
         })
         fileStream.pipe(reply.raw)
         return
@@ -374,7 +372,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           .header('Content-Length', '0')
           .header('ETag', `"${obj.etag}"`)
           .header('Last-Modified', new Date(obj.lastModified).toUTCString())
-          .header('Accept-Ranges', 'bytes')
           .send('')
         return
       }
@@ -388,7 +385,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         'Content-Length': obj.size,
         ETag: `"${obj.etag}"`,
         'Last-Modified': new Date(obj.lastModified).toUTCString(),
-        'Accept-Ranges': 'bytes',
       })
       stream.pipe(reply.raw)
     } catch (error) {
@@ -499,7 +495,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       logger.debug({ bucket, key, uploadId }, 'CompleteMultipartUpload')
 
       const upload = metadataStore.getMultipartUpload(uploadId)
-      if (!upload) {
+      if (!upload || upload.bucket !== bucket || upload.key !== key) {
         sendS3Error(reply, 404, 'NoSuchUpload', 'The specified multipart upload does not exist.', key)
         return
       }
@@ -594,7 +590,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       logger.debug({ bucket, key, uploadId, partNumber }, 'UploadPart')
 
       const upload = metadataStore.getMultipartUpload(uploadId)
-      if (!upload) {
+      if (!upload || upload.bucket !== bucket || upload.key !== key) {
         sendS3Error(reply, 404, 'NoSuchUpload', 'The specified multipart upload does not exist.', key)
         return
       }
@@ -753,7 +749,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       logger.debug({ bucket, key, uploadId }, 'AbortMultipartUpload')
 
       const upload = metadataStore.getMultipartUpload(uploadId)
-      if (!upload) {
+      if (!upload || upload.bucket !== bucket || upload.key !== key) {
         sendS3Error(reply, 404, 'NoSuchUpload', 'The specified multipart upload does not exist.', key)
         return
       }

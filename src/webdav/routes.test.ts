@@ -204,6 +204,16 @@ describe('WebDAV Routes', () => {
       expect(response.statusCode).toBe(204)
       expect(metadataStore.getObject('default', 'rm-me.txt')).toBeUndefined()
     })
+
+    it('refuses to delete a bucket with active multipart uploads', async () => {
+      metadataStore.createBucket('uploads')
+      metadataStore.createMultipartUpload('upload-1', 'uploads', 'movie.bin', 'application/octet-stream')
+
+      const response = await app.inject({ method: 'DELETE', url: '/uploads' })
+
+      expect(response.statusCode).toBe(409)
+      expect(metadataStore.bucketExists('uploads')).toBe(true)
+    })
   })
 
   // ── MKCOL ────────────────────────────────────────────────────────────
@@ -239,6 +249,20 @@ describe('WebDAV Routes', () => {
       expect(metadataStore.getObject('default', 'copy.txt')?.pieceCid).toBe('cid1')
       expect(metadataStore.getObject('default', 'original.txt')).toBeDefined()
     })
+
+    it('rejects destination buckets that do not exist', async () => {
+      metadataStore.putObject('default', 'original.txt', 'cid1', 100, 'text/plain', 'etag1')
+
+      const response = await app.inject({
+        method: 'COPY',
+        url: '/default/original.txt',
+        headers: { destination: 'http://localhost/missing/copy.txt' },
+      })
+
+      expect(response.statusCode).toBe(409)
+      expect(metadataStore.getObject('missing', 'copy.txt')).toBeUndefined()
+      expect(metadataStore.getObject('default', 'original.txt')).toBeDefined()
+    })
   })
 
   describe('MOVE', () => {
@@ -254,6 +278,20 @@ describe('WebDAV Routes', () => {
       expect(response.statusCode).toBe(201)
       expect(metadataStore.getObject('default', 'new-name.txt')?.pieceCid).toBe('cid1')
       expect(metadataStore.getObject('default', 'old-name.txt')).toBeUndefined()
+    })
+
+    it('rejects destination buckets that do not exist without deleting source', async () => {
+      metadataStore.putObject('default', 'old-name.txt', 'cid1', 100, 'text/plain', 'etag1')
+
+      const response = await app.inject({
+        method: 'MOVE',
+        url: '/default/old-name.txt',
+        headers: { destination: 'http://localhost/missing/new-name.txt' },
+      })
+
+      expect(response.statusCode).toBe(409)
+      expect(metadataStore.getObject('missing', 'new-name.txt')).toBeUndefined()
+      expect(metadataStore.getObject('default', 'old-name.txt')).toBeDefined()
     })
   })
 
@@ -447,7 +485,14 @@ describe('WebDAV Routes', () => {
   describe('GET (0-byte file)', () => {
     it('returns 200 with empty body for a 0-byte object', async () => {
       // Create a 0-byte object directly in the metadata store
-      metadataStore.putObject('default', 'empty.dat', '', 0, 'application/octet-stream', 'd41d8cd98f00b204e9800998ecf8427e')
+      metadataStore.putObject(
+        'default',
+        'empty.dat',
+        '',
+        0,
+        'application/octet-stream',
+        'd41d8cd98f00b204e9800998ecf8427e'
+      )
 
       // Reset mock so previous test calls don't bleed through
       mockSynapse.download.mockClear()
@@ -487,4 +532,3 @@ describe('WebDAV Routes', () => {
     })
   })
 })
-

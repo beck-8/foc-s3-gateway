@@ -188,6 +188,16 @@ describe('S3 Routes', () => {
 
       expect(response.statusCode).toBe(409)
     })
+
+    it('returns 409 when bucket has active multipart uploads', async () => {
+      await app.inject({ method: 'PUT', url: '/uploads' })
+      metadataStore.createMultipartUpload('upload-1', 'uploads', 'movie.bin', 'application/octet-stream')
+
+      const response = await app.inject({ method: 'DELETE', url: '/uploads' })
+
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toContain('BucketNotEmpty')
+    })
   })
 
   // ── ListObjectsV2: GET /{bucket} ───────────────────────────────────
@@ -503,6 +513,15 @@ describe('S3 Routes', () => {
       // Should NOT call synapse download for empty objects
       expect(mockSynapse.download).not.toHaveBeenCalled()
     })
+
+    it('does not advertise byte ranges on full-object download', async () => {
+      metadataStore.putObject('default', 'hello.txt', 'baga-cid', 5, 'text/plain', 'etag1')
+
+      const response = await app.inject({ method: 'GET', url: '/default/hello.txt' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['accept-ranges']).toBeUndefined()
+    })
   })
 
   // ── HeadObject: HEAD /{bucket}/{key} ────────────────────────────────
@@ -531,6 +550,15 @@ describe('S3 Routes', () => {
       await app.inject({ method: 'HEAD', url: '/default/check.txt' })
 
       expect(mockSynapse.download).not.toHaveBeenCalled()
+    })
+
+    it('does not advertise byte ranges', async () => {
+      metadataStore.putObject('default', 'check.txt', 'cid', 10, 'text/plain', 'etag')
+
+      const response = await app.inject({ method: 'HEAD', url: '/default/check.txt' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['accept-ranges']).toBeUndefined()
     })
   })
 
@@ -753,6 +781,64 @@ describe('S3 Routes', () => {
       })
       expect(response.statusCode).toBe(404)
       expect(response.body).toContain('NoSuchBucket')
+    })
+
+    it('rejects UploadPart when uploadId belongs to a different object path', async () => {
+      const initResp = await app.inject({
+        method: 'POST',
+        url: '/default/original.txt?uploads=',
+      })
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: `/default/other.txt?partNumber=1&uploadId=${uploadId}`,
+        payload: 'x'.repeat(128),
+      })
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body).toContain('NoSuchUpload')
+    })
+
+    it('rejects CompleteMultipartUpload when uploadId belongs to a different object path', async () => {
+      const initResp = await app.inject({
+        method: 'POST',
+        url: '/default/original.txt?uploads=',
+      })
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+
+      await app.inject({
+        method: 'PUT',
+        url: `/default/original.txt?partNumber=1&uploadId=${uploadId}`,
+        payload: 'x'.repeat(128),
+      })
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/default/other.txt?uploadId=${uploadId}`,
+        payload: '<CompleteMultipartUpload></CompleteMultipartUpload>',
+      })
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body).toContain('NoSuchUpload')
+      expect(metadataStore.getObject('default', 'other.txt')).toBeUndefined()
+    })
+
+    it('rejects AbortMultipartUpload when uploadId belongs to a different object path', async () => {
+      const initResp = await app.inject({
+        method: 'POST',
+        url: '/default/original.txt?uploads=',
+      })
+      const uploadId = initResp.body.match(/<UploadId>(.*?)<\/UploadId>/)![1]
+
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/default/other.txt?uploadId=${uploadId}`,
+      })
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body).toContain('NoSuchUpload')
+      expect(metadataStore.getMultipartUpload(uploadId)).toBeDefined()
     })
   })
 })

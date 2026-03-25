@@ -215,6 +215,10 @@ export class MetadataStore {
     const hasObjects = this.db.prepare('SELECT 1 FROM objects WHERE bucket = ? AND deleted = 0 LIMIT 1').get(name)
     if (hasObjects) return false
 
+    // Refuse deletion while multipart sessions still target this bucket
+    const hasMultipartUploads = this.db.prepare('SELECT 1 FROM multipart_uploads WHERE bucket = ? LIMIT 1').get(name)
+    if (hasMultipartUploads) return false
+
     const stmt = this.db.prepare('DELETE FROM buckets WHERE name = ?')
     const result = stmt.run(name)
     return result.changes > 0
@@ -556,6 +560,7 @@ export class MetadataStore {
   copyObject(srcBucket: string, srcKey: string, dstBucket: string, dstKey: string): S3Object | undefined {
     const src = this.getObject(srcBucket, srcKey)
     if (!src) return undefined
+    if (!this.bucketExists(dstBucket)) return undefined
 
     const srcCopies = this.getObjectCopies(srcBucket, srcKey)
 
@@ -578,9 +583,7 @@ export class MetadataStore {
         }>
 
         const otherRef = this.db
-          .prepare(
-            'SELECT 1 FROM objects WHERE piece_cid = ? AND deleted = 0 AND NOT (bucket = ? AND key = ?) LIMIT 1'
-          )
+          .prepare('SELECT 1 FROM objects WHERE piece_cid = ? AND deleted = 0 AND NOT (bucket = ? AND key = ?) LIMIT 1')
           .get(existing.piece_cid, dstBucket, dstKey)
 
         if (!otherRef && oldCopies.length > 0) {

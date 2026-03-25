@@ -298,6 +298,11 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         return
       }
 
+      if (!metadataStore.bucketExists(dstBucket)) {
+        reply.status(409).send('Destination bucket does not exist')
+        return
+      }
+
       const copied = metadataStore.copyObject(srcBucket, srcKey, dstBucket, dstKey)
       if (!copied) {
         reply.status(404).send('Source not found')
@@ -328,6 +333,11 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
 
       if (!dstBucket || !dstKey) {
         reply.status(400).send('Invalid destination')
+        return
+      }
+
+      if (!metadataStore.bucketExists(dstBucket)) {
+        reply.status(409).send('Destination bucket does not exist')
         return
       }
 

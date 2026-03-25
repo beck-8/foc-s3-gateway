@@ -101,6 +101,16 @@ describe('MetadataStore', () => {
       const deleted = store.deleteBucket('nonexistent')
       expect(deleted).toBe(false)
     })
+
+    it('refuses to delete bucket with active multipart uploads', () => {
+      store.createBucket('uploads')
+      store.createMultipartUpload('upload-1', 'uploads', 'movie.bin', 'application/octet-stream')
+
+      const deleted = store.deleteBucket('uploads')
+
+      expect(deleted).toBe(false)
+      expect(store.bucketExists('uploads')).toBe(true)
+    })
   })
 
   // ── Object copies ───────────────────────────────────────────────────
@@ -243,6 +253,15 @@ describe('MetadataStore', () => {
       store.copyObject('default', 'new.txt', 'default', 'old.txt')
 
       expect(store.getObject('default', 'old.txt')?.pieceCid).toBe('cid-new')
+    })
+
+    it('returns undefined when destination bucket does not exist', () => {
+      store.putObject('default', 'src.txt', 'cid-src', 100, 'text/plain', 'etag-src')
+
+      const result = store.copyObject('default', 'src.txt', 'missing-bucket', 'dst.txt')
+
+      expect(result).toBeUndefined()
+      expect(store.getObject('missing-bucket', 'dst.txt')).toBeUndefined()
     })
   })
 

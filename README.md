@@ -152,6 +152,7 @@ InitiateMultipartUpload → UploadPart (×N) → CompleteMultipartUpload
 ```
 
 Parts are saved individually to disk, merged into a single file on complete, then queued for async FOC upload.
+Each `uploadId` is bound to the original bucket/key pair that created it. Uploading parts, completing, or aborting through a different path is rejected.
 
 ## Upload Status API
 
@@ -187,7 +188,7 @@ With `?detail=true`, each pending/uploading/failed object is listed with `bucket
 |-----------|-------------|
 | ListBuckets | List all buckets |
 | CreateBucket | Create new bucket (`PUT /:bucket`) |
-| DeleteBucket | Delete empty bucket (default protected) |
+| DeleteBucket | Delete bucket only when it has no live objects and no active multipart uploads (default protected) |
 | HeadBucket | Check bucket existence |
 | ListObjectsV2 | List with prefix/delimiter/pagination |
 | PutObject | Stage to local disk, async upload to FOC |
@@ -236,8 +237,8 @@ With `?detail=true`, each pending/uploading/failed object is listed with `bucket
 | PUT | Upload file (async staging) |
 | DELETE | Delete file or bucket + cleanup local files |
 | MKCOL | Create bucket (top-level directory) |
-| COPY | Copy file (metadata only) |
-| MOVE | Move / rename (copy + delete) |
+| COPY | Copy file (metadata only, destination bucket must already exist) |
+| MOVE | Move / rename (copy + delete, destination bucket must already exist) |
 | HEAD | File metadata |
 
 ### ⚠️ Stub Methods (return success but no-op)
@@ -250,7 +251,7 @@ With `?detail=true`, each pending/uploading/failed object is listed with `bucket
 
 ### ❌ Not Supported
 
-DAV Class 2/3, Range requests, real locking, custom property persistence
+DAV Class 2/3, Range requests (only full-object reads are supported), real locking, custom property persistence
 
 ### Path Structure
 
