@@ -247,7 +247,12 @@ export class SynapseClient {
 
         const fetchOptions: RequestInit = rangeHeader ? { headers: { Range: rangeHeader } } : {}
         const response = await fetch(copy.retrievalUrl, fetchOptions)
-        if ((response.ok || response.status === 206) && response.body) {
+
+        // When range is requested, only accept 206 — if SP returns 200 it ignored
+        // our Range header and is sending the full file. Piping that into a response
+        // with Content-Length = range_size would corrupt the download.
+        const acceptable = range ? response.status === 206 : response.ok
+        if (acceptable && response.body) {
           const clHeader = response.headers.get('content-length')
           const contentLength = clHeader ? Number(clHeader) : undefined
           this.logger.info(
@@ -260,10 +265,18 @@ export class SynapseClient {
           return result
         }
 
-        this.logger.warn(
-          { pieceCid, providerId: copy.providerId, status: response.status },
-          'direct download failed, trying next'
-        )
+        // If SP returned 200 when we wanted 206, log specifically
+        if (range && response.ok) {
+          this.logger.warn(
+            { pieceCid, providerId: copy.providerId, status: response.status },
+            'SP does not support Range requests, skipping to next'
+          )
+        } else {
+          this.logger.warn(
+            { pieceCid, providerId: copy.providerId, status: response.status },
+            'direct download failed, trying next'
+          )
+        }
       } catch (error) {
         this.logger.warn({ pieceCid, providerId: copy.providerId, error }, 'direct download error, trying next')
       }
