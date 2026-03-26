@@ -20,11 +20,13 @@ description: How to add new features to the SQLite metadata store (schema change
 -- Core tables
 buckets (name TEXT PK, created_at TEXT)
 objects (bucket TEXT, key TEXT, piece_cid TEXT, size INT, content_type TEXT,
-         etag TEXT, copies_count INT, status TEXT, local_path TEXT,
-         upload_attempts INT, created_at TEXT, updated_at TEXT, deleted INT,
-         PK(bucket, key))
+         etag TEXT, copies_count INT, desired_copies INT, status TEXT,
+         local_path TEXT, upload_attempts INT, created_at TEXT,
+         updated_at TEXT, deleted INT, PK(bucket, key))
 object_copies (bucket TEXT, key TEXT, provider_id TEXT, data_set_id TEXT,
                piece_id TEXT, retrieval_url TEXT, role TEXT,
+               health_status TEXT, consecutive_failures INT,
+               last_checked_at TEXT, last_success_at TEXT,
                PK(bucket, key, provider_id))
 pending_deletions (id INT PK AUTO, piece_cid TEXT, piece_id TEXT,
                    provider_id TEXT, data_set_id TEXT, retrieval_url TEXT,

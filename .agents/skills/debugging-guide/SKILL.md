@@ -77,6 +77,30 @@ SELECT bucket, key, status, upload_attempts, local_path FROM objects WHERE statu
 - SP API errors — check `pending_deletions.attempts` column
 - After 5 failed attempts, deletion stops retrying (cooldown: 5 minutes between retries)
 
+### 7. ProbeWorker Shows All Copies as Unhealthy
+
+**Symptom**: Status API shows many `unhealthyFiles` or `suspectFiles`.
+
+**Causes**:
+- **SP temporarily down**: Probe sends HEAD requests to SP retrieval URLs — transient failures increment `consecutive_failures`
+- **Threshold not reached**: Copies stay `suspect` until `consecutive_failures >= COPY_UNHEALTHY_FAILURE_THRESHOLD` (default 24)
+- **Network issues**: RPC or SP endpoints unreachable — check logs for `probe-worker` errors
+
+**Check**:
+```sql
+SELECT bucket, key, provider_id, health_status, consecutive_failures, last_checked_at
+FROM object_copies WHERE health_status != 'healthy' ORDER BY consecutive_failures DESC;
+```
+
+### 8. RepairWorker Not Repairing Files
+
+**Symptom**: Status API shows `unhealthyFiles > 0` but `repairingFiles` stays 0.
+
+**Causes**:
+- **Cooldown active**: After a failed/incomplete repair, per-object cooldown (`REPAIR_COOLDOWN_MS`, default 5 min) prevents immediate retry
+- **No healthy copy left**: RepairWorker needs at least one healthy copy as source — files with 0 healthy copies are `failedFiles`
+- **All copies meet desired count**: If healthy copies ≥ `desired_copies`, no repair is triggered
+
 ## Debugging Tools
 
 ### Status API
@@ -115,6 +139,8 @@ Each component has a child logger with `module` field:
 - `synapse-client` — SDK calls (upload/download/delete)
 - `local-store` — disk operations
 - `upload-worker` — background upload cycle
+- `probe-worker` — copy health probe cycle
+- `repair-worker` — under-replicated repair cycle
 - `cleanup-worker` — background deletion cycle
 
 Use `LOG_LEVEL=debug` environment variable for verbose output.

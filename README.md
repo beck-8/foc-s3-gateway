@@ -235,6 +235,7 @@ With `?detail=true`, each pending/uploading/failed object is listed with `bucket
 | GetObject | Local-first download (disk → SP URLs → SDK) |
 | HeadObject | Get object metadata without downloading |
 | DeleteObject | Soft delete + cleanup local staged file |
+| DeleteObjects | Batch delete via `POST /{bucket}?delete` |
 | CopyObject | Copy metadata to new key (no re-upload) |
 | InitiateMultipartUpload | Start multipart upload session |
 | UploadPart | Upload individual part to disk |
@@ -245,7 +246,6 @@ With `?detail=true`, each pending/uploading/failed object is listed with `bucket
 
 | Operation | Reason |
 |-----------|--------|
-| DeleteObjects (batch) | Not implemented |
 | Versioning | No version management |
 | ACL / Bucket Policy | Single-user system |
 | ListObjectsV1 | Only V2 supported |
@@ -291,7 +291,11 @@ With `?detail=true`, each pending/uploading/failed object is listed with `bucket
 
 ### ❌ Not Supported
 
-DAV Class 2/3, Range requests (only full-object reads are supported), real locking, custom property persistence
+DAV Class 2/3, real locking, custom property persistence
+
+### Supported Extensions
+
+- **Range requests**: Single byte-range requests (RFC 7233) for both S3 and WebDAV (206 Partial Content)
 
 ### Path Structure
 
