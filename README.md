@@ -4,7 +4,8 @@ S3 + WebDAV gateway for [Filecoin Onchain Cloud (FOC)](https://github.com/FilOzo
 
 # Demo
 
-will be updated later
+- https://foc.filture.io/
+- https://foc.filture.io/FOC-video-demo
 
 ## What is this?
 
