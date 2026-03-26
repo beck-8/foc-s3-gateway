@@ -534,4 +534,58 @@ describe('WebDAV Routes', () => {
       expect(mockSynapse.download).not.toHaveBeenCalled()
     })
   })
+
+  // ── GET: byte range ─────────────────────────────────────────────────
+
+  describe('GET (byte range)', () => {
+    it('returns 206 with partial content for Range request from local disk', async () => {
+      const payload = 'x'.repeat(128)
+      await app.inject({
+        method: 'PUT',
+        url: '/default/range.bin',
+        payload,
+        headers: { 'content-type': 'application/octet-stream' },
+      })
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/default/range.bin',
+        headers: { range: 'bytes=0-9' },
+      })
+
+      expect(response.statusCode).toBe(206)
+      expect(response.headers['content-range']).toBe('bytes 0-9/128')
+      expect(response.headers['content-length']).toBe('10')
+      expect(response.headers['accept-ranges']).toBe('bytes')
+      expect(response.body).toBe('x'.repeat(10))
+    })
+
+    it('returns 416 for out-of-range Range request', async () => {
+      const payload = 'x'.repeat(128)
+      await app.inject({
+        method: 'PUT',
+        url: '/default/small.bin',
+        payload,
+        headers: { 'content-type': 'application/octet-stream' },
+      })
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/default/small.bin',
+        headers: { range: 'bytes=200-300' },
+      })
+
+      expect(response.statusCode).toBe(416)
+      expect(response.headers['content-range']).toBe('bytes */128')
+    })
+
+    it('returns Accept-Ranges header on full download', async () => {
+      metadataStore.putObject('default', 'info.txt', 'cid1', 512, 'text/plain', 'etag-info')
+
+      const response = await app.inject({ method: 'GET', url: '/default/info.txt' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.headers['accept-ranges']).toBe('bytes')
+    })
+  })
 })

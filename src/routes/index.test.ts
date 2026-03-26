@@ -633,7 +633,7 @@ describe('S3 Routes', () => {
       expect(response.statusCode).toBe(200)
       expect(response.headers['content-type']).toBe('text/plain')
       expect(response.headers.etag).toBe('"etag1"')
-      expect(mockSynapse.download).toHaveBeenCalledWith('baga-cid', [])
+      expect(mockSynapse.download).toHaveBeenCalledWith('baga-cid', [], undefined)
       expect(response.body).toBe('Hello')
     })
 
@@ -690,13 +690,94 @@ describe('S3 Routes', () => {
       expect(mockSynapse.download).not.toHaveBeenCalled()
     })
 
-    it('does not advertise byte ranges on full-object download', async () => {
+    it('advertises byte ranges on full-object download', async () => {
       metadataStore.putObject('default', 'hello.txt', 'baga-cid', 5, 'text/plain', 'etag1')
 
       const response = await app.inject({ method: 'GET', url: '/default/hello.txt' })
 
       expect(response.statusCode).toBe(200)
-      expect(response.headers['accept-ranges']).toBeUndefined()
+      expect(response.headers['accept-ranges']).toBe('bytes')
+    })
+
+    it('returns 206 with partial content for Range request from local disk', async () => {
+      // Stage a file via PutObject (128 bytes of 'x')
+      const payload = 'x'.repeat(128)
+      await app.inject({
+        method: 'PUT',
+        url: '/default/ranged.txt',
+        payload,
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/default/ranged.txt',
+        headers: { range: 'bytes=0-9' },
+      })
+
+      expect(response.statusCode).toBe(206)
+      expect(response.headers['content-range']).toBe('bytes 0-9/128')
+      expect(response.headers['content-length']).toBe('10')
+      expect(response.headers['accept-ranges']).toBe('bytes')
+      expect(response.body).toBe('x'.repeat(10))
+    })
+
+    it('returns 206 for suffix range (bytes=-10)', async () => {
+      const payload = `abcdefghij${'x'.repeat(118)}`
+      await app.inject({
+        method: 'PUT',
+        url: '/default/suffix.txt',
+        payload,
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/default/suffix.txt',
+        headers: { range: 'bytes=-10' },
+      })
+
+      expect(response.statusCode).toBe(206)
+      expect(response.headers['content-range']).toBe('bytes 118-127/128')
+      expect(response.headers['content-length']).toBe('10')
+    })
+
+    it('returns 416 for out-of-range Range request', async () => {
+      const payload = 'x'.repeat(128)
+      await app.inject({
+        method: 'PUT',
+        url: '/default/small.txt',
+        payload,
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/default/small.txt',
+        headers: { range: 'bytes=200-300' },
+      })
+
+      expect(response.statusCode).toBe(416)
+      expect(response.headers['content-range']).toBe('bytes */128')
+    })
+
+    it('ignores invalid Range header and returns full 200', async () => {
+      const payload = 'x'.repeat(128)
+      await app.inject({
+        method: 'PUT',
+        url: '/default/full.txt',
+        payload,
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/default/full.txt',
+        headers: { range: 'items=0-5' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toBe(payload)
     })
   })
 
@@ -728,13 +809,13 @@ describe('S3 Routes', () => {
       expect(mockSynapse.download).not.toHaveBeenCalled()
     })
 
-    it('does not advertise byte ranges', async () => {
+    it('advertises byte ranges', async () => {
       metadataStore.putObject('default', 'check.txt', 'cid', 10, 'text/plain', 'etag')
 
       const response = await app.inject({ method: 'HEAD', url: '/default/check.txt' })
 
       expect(response.statusCode).toBe(200)
-      expect(response.headers['accept-ranges']).toBeUndefined()
+      expect(response.headers['accept-ranges']).toBe('bytes')
     })
   })
 

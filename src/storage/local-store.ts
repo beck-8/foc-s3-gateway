@@ -106,9 +106,9 @@ export class LocalStore {
     return { localPath: stagedPath, size: totalSize, etag: md5.digest('hex') }
   }
 
-  /** Create a file read stream for a staged file */
-  createReadStream(localPath: string): import('node:fs').ReadStream {
-    return createReadStream(localPath)
+  /** Create a file read stream for a staged file, optionally with byte range */
+  createReadStream(localPath: string, options?: { start?: number; end?: number }): import('node:fs').ReadStream {
+    return createReadStream(localPath, options)
   }
 
   /** Check if a local file exists */

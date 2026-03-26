@@ -220,12 +220,20 @@ export class SynapseClient {
    *
    * Returns a Node.js Readable stream so data is piped directly to the client
    * without buffering entire files in memory.
+   *
+   * @param pieceCid - The PieceCID of the data to download
+   * @param copies  - Known retrieval copies (tried first via direct fetch)
+   * @param range   - Optional byte range `{ start, end }` (inclusive, 0-indexed)
    */
   async download(
     pieceCid: string,
-    copies?: CopyInfo[]
+    copies?: CopyInfo[],
+    range?: { start: number; end: number }
   ): Promise<{ stream: import('node:stream').Readable; contentLength?: number }> {
     const { Readable } = await import('node:stream')
+
+    // Build Range header string once
+    const rangeHeader = range ? `bytes=${range.start}-${range.end}` : undefined
 
     // Sort: primary first, then secondary
     const sorted = copies
@@ -235,14 +243,15 @@ export class SynapseClient {
     // Try stored retrieval URLs first (fast path — no chain lookups)
     for (const copy of sorted) {
       try {
-        this.logger.debug({ pieceCid, providerId: copy.providerId, role: copy.role }, 'trying direct download')
+        this.logger.debug({ pieceCid, providerId: copy.providerId, role: copy.role, range }, 'trying direct download')
 
-        const response = await fetch(copy.retrievalUrl)
-        if (response.ok && response.body) {
+        const fetchOptions: RequestInit = rangeHeader ? { headers: { Range: rangeHeader } } : {}
+        const response = await fetch(copy.retrievalUrl, fetchOptions)
+        if ((response.ok || response.status === 206) && response.body) {
           const clHeader = response.headers.get('content-length')
           const contentLength = clHeader ? Number(clHeader) : undefined
           this.logger.info(
-            { pieceCid, providerId: copy.providerId, role: copy.role, contentLength },
+            { pieceCid, providerId: copy.providerId, role: copy.role, contentLength, status: response.status },
             'direct download streaming started'
           )
           const nodeStream = Readable.fromWeb(response.body as import('node:stream/web').ReadableStream)
@@ -264,6 +273,16 @@ export class SynapseClient {
     this.logger.info({ pieceCid }, 'falling back to SDK download')
     const synapse = this.getSynapse()
     const data = await synapse.storage.download({ pieceCid })
+
+    // If range requested, slice the full buffer
+    if (range) {
+      const sliced = data.slice(range.start, range.end + 1)
+      this.logger.info(
+        { pieceCid, size: data.length, rangeSize: sliced.length },
+        'SDK download complete (range sliced)'
+      )
+      return { stream: Readable.from(sliced), contentLength: sliced.length }
+    }
 
     this.logger.info({ pieceCid, size: data.length }, 'SDK download complete, wrapping as stream')
     return { stream: Readable.from(data), contentLength: data.length }

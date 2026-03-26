@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { Logger } from 'pino'
+import { parseRangeHeader } from '../s3/range.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
@@ -96,29 +97,60 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
       return
     }
 
+    // ── Range handling ────────────────────────────────────────────────
+    const rangeHeaderValue = request.headers.range as string | undefined
+    let range: { start: number; end: number } | undefined
+
+    if (rangeHeaderValue) {
+      const parsed = parseRangeHeader(rangeHeaderValue, obj.size)
+      if (parsed === 'unsatisfiable') {
+        reply.raw.writeHead(416, { 'Content-Range': `bytes */${obj.size}` })
+        reply.raw.end('Range Not Satisfiable')
+        return
+      }
+      if (parsed !== undefined) {
+        range = parsed
+      }
+    }
+
+    const baseHeaders: Record<string, string | number> = {
+      'Content-Type': obj.contentType,
+      ETag: `"${obj.etag}"`,
+      'Last-Modified': new Date(obj.lastModified).toUTCString(),
+      'Accept-Ranges': 'bytes',
+    }
+
     try {
       // Local-first: try local disk before going to FOC
       const localPath = metadataStore.getLocalPath(bucket, key)
       if (localPath && localStore.exists(localPath)) {
-        logger.debug({ bucket, key, localPath }, 'WebDAV serving from local disk')
-        const fileStream = localStore.createReadStream(localPath)
-        reply.raw.writeHead(200, {
-          'Content-Type': obj.contentType,
-          'Content-Length': obj.size,
-          ETag: `"${obj.etag}"`,
-          'Last-Modified': new Date(obj.lastModified).toUTCString(),
-        })
-        fileStream.pipe(reply.raw)
+        logger.debug({ bucket, key, localPath, range }, 'WebDAV serving from local disk')
+
+        if (range) {
+          const contentLength = range.end - range.start + 1
+          const fileStream = localStore.createReadStream(localPath, { start: range.start, end: range.end })
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': contentLength,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+          fileStream.pipe(reply.raw)
+        } else {
+          const fileStream = localStore.createReadStream(localPath)
+          reply.raw.writeHead(200, {
+            ...baseHeaders,
+            'Content-Length': obj.size,
+          })
+          fileStream.pipe(reply.raw)
+        }
         return
       }
 
       // Empty files (0B, no pieceCid) — return empty body with correct headers
       if (!obj.pieceCid || obj.size === 0) {
         reply.raw.writeHead(200, {
-          'Content-Type': obj.contentType,
+          ...baseHeaders,
           'Content-Length': 0,
-          ETag: `"${obj.etag}"`,
-          'Last-Modified': new Date(obj.lastModified).toUTCString(),
         })
         reply.raw.end()
         return
@@ -126,14 +158,21 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
 
       // Fall back to FOC download
       const copies = metadataStore.getObjectCopies(bucket, key)
-      const { stream } = await synapseClient.download(obj.pieceCid, copies)
+      const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
 
-      reply.raw.writeHead(200, {
-        'Content-Type': obj.contentType,
-        'Content-Length': obj.size,
-        ETag: `"${obj.etag}"`,
-        'Last-Modified': new Date(obj.lastModified).toUTCString(),
-      })
+      if (range) {
+        const contentLength = range.end - range.start + 1
+        reply.raw.writeHead(206, {
+          ...baseHeaders,
+          'Content-Length': contentLength,
+          'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+        })
+      } else {
+        reply.raw.writeHead(200, {
+          ...baseHeaders,
+          'Content-Length': obj.size,
+        })
+      }
       stream.pipe(reply.raw)
     } catch (error) {
       logger.error({ error, bucket, key }, 'WebDAV download failed')

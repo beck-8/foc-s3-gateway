@@ -35,3 +35,8 @@ export function sendNoSuchBucket(reply: FastifyReply, bucket: string): void {
 export function sendInternalError(reply: FastifyReply, message: string): void {
   sendS3Error(reply, 500, 'InternalError', message)
 }
+
+export function sendInvalidRange(reply: FastifyReply, totalSize: number, resource?: string): void {
+  reply.header('Content-Range', `bytes */${totalSize}`)
+  sendS3Error(reply, 416, 'InvalidRange', 'The requested range is not satisfiable.', resource)
+}

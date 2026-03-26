@@ -16,7 +16,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import type { Logger } from 'pino'
-import { sendInternalError, sendNoSuchBucket, sendNoSuchKey, sendS3Error } from '../s3/errors.js'
+import { sendInternalError, sendInvalidRange, sendNoSuchBucket, sendNoSuchKey, sendS3Error } from '../s3/errors.js'
+import { parseRangeHeader } from '../s3/range.js'
 import {
   buildCompleteMultipartUploadXml,
   buildCopyObjectResultXml,
@@ -343,6 +344,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       .header('Content-Length', obj.size)
       .header('ETag', `"${obj.etag}"`)
       .header('Last-Modified', new Date(obj.lastModified).toUTCString())
+      .header('Accept-Ranges', 'bytes')
       .send()
   })
 
@@ -421,19 +423,52 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return
     }
 
+    // ── Range handling ────────────────────────────────────────────────
+    const rangeHeader = request.headers.range as string | undefined
+    let range: { start: number; end: number } | undefined
+
+    if (rangeHeader) {
+      const parsed = parseRangeHeader(rangeHeader, obj.size)
+      if (parsed === 'unsatisfiable') {
+        sendInvalidRange(reply, obj.size, key)
+        return
+      }
+      // undefined = unparseable / non-byte range → ignore, serve full 200
+      if (parsed !== undefined) {
+        range = parsed
+      }
+    }
+
+    const baseHeaders: Record<string, string | number> = {
+      'Content-Type': obj.contentType,
+      ETag: `"${obj.etag}"`,
+      'Last-Modified': new Date(obj.lastModified).toUTCString(),
+      'Accept-Ranges': 'bytes',
+    }
+
     try {
       // Local-first: try local disk before going to FOC
       const localPath = metadataStore.getLocalPath(bucket, key)
       if (localPath && localStore.exists(localPath)) {
-        logger.debug({ bucket, key, localPath }, 'serving from local disk')
-        const fileStream = localStore.createReadStream(localPath)
-        reply.raw.writeHead(200, {
-          'Content-Type': obj.contentType,
-          'Content-Length': obj.size,
-          ETag: `"${obj.etag}"`,
-          'Last-Modified': new Date(obj.lastModified).toUTCString(),
-        })
-        fileStream.pipe(reply.raw)
+        logger.debug({ bucket, key, localPath, range }, 'serving from local disk')
+
+        if (range) {
+          const contentLength = range.end - range.start + 1
+          const fileStream = localStore.createReadStream(localPath, { start: range.start, end: range.end })
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': contentLength,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+          fileStream.pipe(reply.raw)
+        } else {
+          const fileStream = localStore.createReadStream(localPath)
+          reply.raw.writeHead(200, {
+            ...baseHeaders,
+            'Content-Length': obj.size,
+          })
+          fileStream.pipe(reply.raw)
+        }
         return
       }
 
@@ -445,20 +480,28 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           .header('Content-Length', '0')
           .header('ETag', `"${obj.etag}"`)
           .header('Last-Modified', new Date(obj.lastModified).toUTCString())
+          .header('Accept-Ranges', 'bytes')
           .send('')
         return
       }
 
       // Fall back to FOC download (direct SP URLs → SDK discovery)
       const copies = metadataStore.getObjectCopies(bucket, key)
-      const { stream } = await synapseClient.download(obj.pieceCid, copies)
+      const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
 
-      reply.raw.writeHead(200, {
-        'Content-Type': obj.contentType,
-        'Content-Length': obj.size,
-        ETag: `"${obj.etag}"`,
-        'Last-Modified': new Date(obj.lastModified).toUTCString(),
-      })
+      if (range) {
+        const contentLength = range.end - range.start + 1
+        reply.raw.writeHead(206, {
+          ...baseHeaders,
+          'Content-Length': contentLength,
+          'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+        })
+      } else {
+        reply.raw.writeHead(200, {
+          ...baseHeaders,
+          'Content-Length': obj.size,
+        })
+      }
       stream.pipe(reply.raw)
     } catch (error) {
       logger.error({ error, bucket, key, pieceCid: obj.pieceCid }, 'download failed')
