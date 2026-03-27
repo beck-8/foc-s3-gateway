@@ -25,9 +25,16 @@ WebDAV Clients (Finder/Explorer) ──WebDAV──┘
 
 ## Quick Start
 
+### Prerequisites
+
+- **Node.js 22+** (LTS recommended)
+- A Filecoin wallet private key (with `0x` prefix)
+
 ### 1. Install & Build
 
 ```bash
+git clone https://github.com/FilOzone/foc-s3-gateway.git
+cd foc-s3-gateway
 npm install
 npm run build
 ```
@@ -37,10 +44,10 @@ npm run build
 ```bash
 # Minimal (no auth, calibration testnet)
 export PRIVATE_KEY=0x...
-foc-s3-gateway serve
+node dist/cli.js serve
 
 # With authentication
-foc-s3-gateway serve \
+node dist/cli.js serve \
   --private-key 0x... \
   --access-key myAccessKey \
   --secret-key mySecretKey \
@@ -99,6 +106,149 @@ pass = mySecretKey
 #### macOS
 
 Finder → Go → Connect to Server → `http://localhost:8334` (username = Access Key, password = Secret Key)
+
+## Docker Deployment
+
+### Quick start with Docker
+
+```bash
+docker build -t foc-s3-gateway .
+docker run -d \
+  --name foc-s3-gateway \
+  -p 8333:8333 \
+  -p 8334:8334 \
+  -e PRIVATE_KEY=0x... \
+  -e ACCESS_KEY=myAccessKey \
+  -e SECRET_KEY=mySecretKey \
+  -e NETWORK=calibration \
+  -v foc-data:/data \
+  foc-s3-gateway
+```
+
+### Docker Compose (recommended)
+
+```bash
+# 1. Copy the example env file and edit it
+cp .env.example .env
+# Edit .env — set at least PRIVATE_KEY
+
+# 2. Start the gateway
+docker compose up -d
+
+# 3. Check logs
+docker compose logs -f
+
+# 4. Check status
+curl http://localhost:8333/_/status
+```
+
+### Data persistence
+
+All data (SQLite database + staged files) is stored in the `/data` volume. As long as you don't remove the `foc-data` Docker volume, your data survives container restarts and upgrades.
+
+```bash
+# Backup the data volume
+docker run --rm -v foc-data:/data -v $(pwd):/backup alpine \
+  tar czf /backup/foc-data-backup.tar.gz -C /data .
+
+# Restore
+docker run --rm -v foc-data:/data -v $(pwd):/backup alpine \
+  tar xzf /backup/foc-data-backup.tar.gz -C /data
+```
+
+### Useful commands
+
+```bash
+docker compose up -d       # Start in background
+docker compose down        # Stop (data preserved)
+docker compose logs -f     # Follow logs
+docker compose restart     # Restart the gateway
+docker compose pull        # Pull latest image (if using a registry)
+docker compose up -d --build  # Rebuild and restart
+```
+
+## Production Deployment
+
+### Checklist
+
+1. **Use `mainnet`** — set `NETWORK=mainnet` in your `.env`
+2. **Enable authentication** — always set `ACCESS_KEY` and `SECRET_KEY`
+3. **Secure your private key** — never commit `.env` to git, use secrets management
+4. **Set up HTTPS** — put a reverse proxy (Nginx / Caddy) in front of the gateway
+5. **Monitor** — check `/_/status` endpoint regularly, watch upload worker and replication health
+
+### Reverse proxy (Nginx example)
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name foc.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/foc.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/foc.example.com/privkey.pem;
+
+    client_max_body_size 1100m;  # slightly above 1 GiB max file size
+
+    # S3 API
+    location / {
+        proxy_pass http://127.0.0.1:8333;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;  # stream uploads directly
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name dav.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/dav.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/dav.example.com/privkey.pem;
+
+    client_max_body_size 1100m;
+
+    # WebDAV
+    location / {
+        proxy_pass http://127.0.0.1:8334;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+    }
+}
+```
+
+### systemd service (Linux, without Docker)
+
+```ini
+[Unit]
+Description=FOC S3 Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=foc
+EnvironmentFile=/etc/foc-s3-gateway/env
+ExecStart=/usr/bin/node /opt/foc-s3-gateway/dist/cli.js serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# /etc/foc-s3-gateway/env
+PRIVATE_KEY=0x...
+ACCESS_KEY=myAccessKey
+SECRET_KEY=mySecretKey
+NETWORK=mainnet
+PORT=8333
+DB_PATH=/var/lib/foc-s3-gateway/metadata.db
+```
 
 ## Authentication
 
