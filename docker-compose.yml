@@ -1,0 +1,21 @@
+services:
+  foc-s3-gateway:
+    build: .
+    container_name: foc-s3-gateway
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8333}:${PORT:-8333}"
+      - "${WEBDAV_PORT:-8334}:${WEBDAV_PORT:-8334}"
+    environment:
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - NETWORK=${NETWORK:-calibration}
+      - PORT=${PORT:-8333}
+      - ACCESS_KEY=${ACCESS_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - COPIES=${COPIES:-2}
+      - RPC_URL=${RPC_URL:-}
+    volumes:
+      - foc-data:/data
+
+volumes:
+  foc-data:
