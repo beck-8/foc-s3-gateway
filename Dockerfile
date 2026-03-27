@@ -1,8 +1,8 @@
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM node:22-slim AS builder
+FROM node:22-alpine AS builder
 
 # better-sqlite3 requires native compilation
-RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -12,18 +12,18 @@ COPY src/ ./src/
 RUN npm run build
 
 # ── Stage 2: Production deps (with build tools) ────────────────
-FROM node:22-slim AS deps
+FROM node:22-alpine AS deps
 
-RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ── Stage 3: Runtime ───────────────────────────────────────────
-FROM node:22-slim AS runtime
+FROM node:22-alpine AS runtime
 
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache curl
 
 WORKDIR /app
 COPY package.json ./
