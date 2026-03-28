@@ -109,8 +109,10 @@ function parseCopySource(copySource: string): { bucket: string; key: string } | 
     return undefined
   }
 
+  const bucket = decodeURIComponent(normalized.slice(0, slashIdx))
+  if (bucket.includes('/')) return undefined
   return {
-    bucket: decodeURIComponent(normalized.slice(0, slashIdx)),
+    bucket,
     key: decodeURIComponent(normalized.slice(slashIdx + 1)),
   }
 }

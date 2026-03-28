@@ -607,6 +607,14 @@ export class MetadataStore {
       .run(id)
   }
 
+  /** Count pending deletions that have exhausted all retry attempts */
+  getAbandonedDeletionCount(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as count FROM pending_deletions WHERE attempts >= 5').get() as {
+      count: number
+    }
+    return row.count
+  }
+
   /** Get deletion queue statistics for the status API */
   getDeletionStats(): { pending: number; failed: number; total: number } {
     const stats = this.db
