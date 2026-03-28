@@ -97,5 +97,14 @@ export class CleanupWorker {
     if (processedCount > 0) {
       this.logger.info({ processedCount }, 'finished batch cleanup of deletions')
     }
+
+    // Warn about permanently failed deletions that have exhausted all retries
+    const abandonedCount = this.metadataStore.getAbandonedDeletionCount()
+    if (abandonedCount > 0) {
+      this.logger.error(
+        { abandonedCount },
+        'pending deletions have exhausted all retries (>= 5 attempts) and will not be retried — manual intervention required'
+      )
+    }
   }
 }

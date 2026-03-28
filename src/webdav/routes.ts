@@ -42,8 +42,8 @@ function parseDavPath(url: string): { bucket?: string; key?: string } {
 function getDepth(request: FastifyRequest): number {
   const depth = request.headers.depth
   if (depth === '0') return 0
-  if (depth === '1' || depth === undefined) return 1
-  return Number.POSITIVE_INFINITY
+  if (depth === 'infinity') return Number.POSITIVE_INFINITY
+  return 1 // default for '1', undefined, or any invalid value
 }
 
 export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteOptions): void {
@@ -329,7 +329,13 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         return
       }
 
-      const destUrl = new URL(destination, `http://${request.headers.host}`)
+      let destUrl: URL
+      try {
+        destUrl = new URL(destination, `http://${request.headers.host}`)
+      } catch {
+        reply.status(400).send('Invalid destination URL')
+        return
+      }
       const { bucket: dstBucket, key: dstKey } = parseDavPath(destUrl.pathname)
 
       if (!dstBucket || !dstKey) {
@@ -367,7 +373,13 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         return
       }
 
-      const destUrl = new URL(destination, `http://${request.headers.host}`)
+      let destUrl: URL
+      try {
+        destUrl = new URL(destination, `http://${request.headers.host}`)
+      } catch {
+        reply.status(400).send('Invalid destination URL')
+        return
+      }
       const { bucket: dstBucket, key: dstKey } = parseDavPath(destUrl.pathname)
 
       if (!dstBucket || !dstKey) {

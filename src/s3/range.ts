@@ -64,7 +64,7 @@ export function parseRangeHeader(rangeHeader: string, totalSize: number): ByteRa
 
   // byte-range: bytes=200-499
   const end = Number.parseInt(endStr, 10)
-  if (Number.isNaN(end)) return undefined
+  if (Number.isNaN(end) || end < 0) return undefined
 
   // S3 behavior: start > end is invalid
   if (start > end) return undefined
