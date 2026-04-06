@@ -48,7 +48,10 @@ export interface RouteContext {
 
 /** Minimum file size for FOC storage providers */
 const MIN_UPLOAD_SIZE = 127
-/** Maximum upload size (~1 GiB) */
+/** Maximum upload size (~1 GiB).
+ * When encryption is enabled, the encrypted blob is slightly larger (envelope ~250B +
+ * 16B auth tag per 256 KiB chunk ≈ 0.006% overhead). This does not materially affect
+ * the FOC piece size limit, so we validate against plaintext size only. */
 const MAX_UPLOAD_SIZE = 1_065_353_216
 
 /** Read XML body from request — handles cases where Content-Type isn't application/xml */
