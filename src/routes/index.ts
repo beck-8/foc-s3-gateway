@@ -26,7 +26,8 @@ import {
   buildListBucketsXml,
   buildListObjectsV2Xml,
 } from '../s3/xml.js'
-import type { EncryptionService } from '../storage/encryption-service.js'
+import type { BlobFetcher } from 'foc-encryption'
+import type { EncryptionMeta, EncryptionService } from '../storage/encryption-service.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { ProbeWorker } from '../storage/probe-worker.js'
@@ -116,6 +117,30 @@ function parseCopySource(copySource: string): { bucket: string; key: string } | 
   return {
     bucket,
     key: decodeURIComponent(normalized.slice(slashIdx + 1)),
+  }
+}
+
+/** Create a BlobFetcher that reads from a storage provider retrieval URL via HTTP Range */
+function createSpBlobFetcher(retrievalUrl: string): BlobFetcher {
+  return {
+    async fetchEnvelope(): Promise<Uint8Array> {
+      const resp = await fetch(retrievalUrl, {
+        headers: { Range: 'bytes=0-4095' },
+      })
+      if (!resp.ok && resp.status !== 206) {
+        throw new Error(`Failed to fetch envelope: HTTP ${resp.status}`)
+      }
+      return new Uint8Array(await resp.arrayBuffer())
+    },
+    async fetchRange(offset: number, length: number): Promise<Uint8Array> {
+      const resp = await fetch(retrievalUrl, {
+        headers: { Range: `bytes=${offset}-${offset + length - 1}` },
+      })
+      if (!resp.ok && resp.status !== 206) {
+        throw new Error(`Failed to fetch range: HTTP ${resp.status}`)
+      }
+      return new Uint8Array(await resp.arrayBuffer())
+    },
   }
 }
 
@@ -494,28 +519,52 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const encMetaJson = encryptionService ? metadataStore.getEncryptionMeta(bucket, key) : null
 
       if (encMetaJson && encryptionService) {
-        // Encrypted path: download full blob, decrypt, then serve
         const { Readable } = await import('node:stream')
-        const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
-        const plaintext = await encryptionService.decryptBuffer(encryptedBlob)
+        const encMeta: EncryptionMeta = JSON.parse(encMetaJson)
 
-        if (range) {
-          const sliced = plaintext.slice(range.start, range.end + 1)
+        if (range && encMeta.algorithm === -65793) {
+          // Seekable encrypted file with range request: use efficient range decryption
+          const primaryCopy = copies.find(c => c.role === 'primary') ?? copies[0]
+          if (!primaryCopy) {
+            throw new Error('No copies available for range decryption')
+          }
+
+          const fetcher = createSpBlobFetcher(primaryCopy.retrievalUrl)
+          const metadata = await encryptionService.parseEnvelope(fetcher)
+          const plainRange = await encryptionService.decryptRange(fetcher, metadata, {
+            offset: range.start,
+            length: range.end - range.start + 1,
+          })
+
           reply.raw.writeHead(206, {
             ...baseHeaders,
-            'Content-Length': sliced.length,
+            'Content-Length': plainRange.length,
             'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
           })
-          Readable.from(sliced).pipe(reply.raw)
+          Readable.from(plainRange).pipe(reply.raw)
         } else {
-          reply.raw.writeHead(200, {
-            ...baseHeaders,
-            'Content-Length': obj.size,
-          })
-          Readable.from(plaintext).pipe(reply.raw)
+          // Full download + decrypt (non-seekable algorithm, or no range request)
+          const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
+          const plaintext = await encryptionService.decryptBuffer(encryptedBlob)
+
+          if (range) {
+            const sliced = plaintext.slice(range.start, range.end + 1)
+            reply.raw.writeHead(206, {
+              ...baseHeaders,
+              'Content-Length': sliced.length,
+              'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+            })
+            Readable.from(sliced).pipe(reply.raw)
+          } else {
+            reply.raw.writeHead(200, {
+              ...baseHeaders,
+              'Content-Length': obj.size,
+            })
+            Readable.from(plaintext).pipe(reply.raw)
+          }
         }
       } else {
-        // Unencrypted path: stream directly (existing behavior)
+        // Unencrypted path (keep existing code unchanged)
         const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
 
         if (range) {
