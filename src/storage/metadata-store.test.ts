@@ -654,4 +654,51 @@ describe('MetadataStore', () => {
       expect(objects).toHaveLength(0)
     })
   })
+
+  describe('encryption metadata', () => {
+    it('stageObject stores encryption_meta and getEncryptionMeta retrieves it', () => {
+      store.createBucket('enc-test')
+
+      const encMeta = JSON.stringify({
+        algorithm: -65793,
+        envelopeSize: 247,
+        chunkSize: 262144,
+        chunkCount: 4,
+        encryptedSize: 1048640,
+      })
+
+      store.stageObject('enc-test', 'big.bin', 1048576, 'application/octet-stream', 'abc123', '/tmp/staged', undefined, encMeta)
+
+      const meta = store.getEncryptionMeta('enc-test', 'big.bin')
+      expect(meta).not.toBeNull()
+      const parsed = JSON.parse(meta!)
+      expect(parsed.algorithm).toBe(-65793)
+      expect(parsed.envelopeSize).toBe(247)
+      expect(parsed.chunkSize).toBe(262144)
+      expect(parsed.chunkCount).toBe(4)
+      expect(parsed.encryptedSize).toBe(1048640)
+    })
+
+    it('stageObject without encryption_meta stores null', () => {
+      store.createBucket('enc-test2')
+      store.stageObject('enc-test2', 'plain.txt', 500, 'text/plain', 'def456', '/tmp/plain')
+
+      const meta = store.getEncryptionMeta('enc-test2', 'plain.txt')
+      expect(meta).toBeNull()
+    })
+
+    it('completeUpload preserves encryption_meta from stageObject', () => {
+      store.createBucket('enc-test3')
+
+      const encMeta = JSON.stringify({ algorithm: 3, envelopeSize: 200, encryptedSize: 716 })
+      store.stageObject('enc-test3', 'small.bin', 500, 'application/octet-stream', 'aaa', '/tmp/s', undefined, encMeta)
+
+      store.completeUpload('enc-test3', 'small.bin', 'baga6ea4seaq123', [], '/tmp/s')
+
+      const meta = store.getEncryptionMeta('enc-test3', 'small.bin')
+      expect(meta).not.toBeNull()
+      const parsed = JSON.parse(meta!)
+      expect(parsed.algorithm).toBe(3)
+    })
+  })
 })

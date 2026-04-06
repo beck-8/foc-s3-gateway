@@ -190,6 +190,10 @@ export class MetadataStore {
       this.db.exec("UPDATE object_copies SET last_success_at = datetime('now') WHERE last_success_at IS NULL")
       this.logger.info('migrated: added last_success_at column to object_copies')
     }
+    if (!colNames.has('encryption_meta')) {
+      this.db.exec('ALTER TABLE objects ADD COLUMN encryption_meta TEXT')
+      this.logger.info('migrated: added encryption_meta column to objects')
+    }
   }
 
   // ── Config / Identity ─────────────────────────────────────────────
@@ -453,6 +457,14 @@ export class MetadataStore {
     `)
       .all(bucket, key)
     return rows as CopyInfo[]
+  }
+
+  /** Get stored encryption metadata for an object (JSON string or null). */
+  getEncryptionMeta(bucket: string, key: string): string | null {
+    const row = this.db
+      .prepare('SELECT encryption_meta FROM objects WHERE bucket = ? AND key = ? AND deleted = 0')
+      .get(bucket, key) as { encryption_meta: string | null } | undefined
+    return row?.encryption_meta ?? null
   }
 
   listObjects(
@@ -775,7 +787,8 @@ export class MetadataStore {
     contentType: string,
     etag: string,
     localPath: string,
-    desiredCopies?: number
+    desiredCopies?: number,
+    encryptionMeta?: string
   ): void {
     const snapshotDesiredCopies = this.normalizeDesiredCopies(desiredCopies ?? this.getDefaultDesiredCopies())
 
@@ -824,8 +837,8 @@ export class MetadataStore {
       // Upsert the new object
       this.db
         .prepare(
-          `INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, status, local_path, upload_attempts, updated_at, deleted)
-           VALUES (?, ?, '', ?, ?, ?, 0, ?, 'pending', ?, 0, datetime('now'), 0)
+          `INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, status, local_path, upload_attempts, updated_at, deleted, encryption_meta)
+           VALUES (?, ?, '', ?, ?, ?, 0, ?, 'pending', ?, 0, datetime('now'), 0, ?)
            ON CONFLICT (bucket, key) DO UPDATE SET
              piece_cid = '',
              size = excluded.size,
@@ -837,9 +850,10 @@ export class MetadataStore {
              local_path = excluded.local_path,
              upload_attempts = 0,
              updated_at = datetime('now'),
-             deleted = 0`
+             deleted = 0,
+             encryption_meta = excluded.encryption_meta`
         )
-        .run(bucket, key, size, contentType, etag, snapshotDesiredCopies, localPath)
+        .run(bucket, key, size, contentType, etag, snapshotDesiredCopies, localPath, encryptionMeta ?? null)
     })
 
     transaction()
@@ -878,16 +892,16 @@ export class MetadataStore {
   }
 
   /** Complete an async upload: set pieceCid, copies, clear local_path */
-  completeUpload(bucket: string, key: string, pieceCid: string, copies?: CopyInfo[], localPath?: string): void {
+  completeUpload(bucket: string, key: string, pieceCid: string, copies?: CopyInfo[], localPath?: string, encryptionMeta?: string): void {
     const copiesCount = copies?.length ?? 0
 
     const transaction = this.db.transaction(() => {
       const result = this.db
         .prepare(
-          `UPDATE objects SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, updated_at = datetime('now')
+          `UPDATE objects SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, encryption_meta = COALESCE(?, encryption_meta), updated_at = datetime('now')
            WHERE bucket = ? AND key = ? AND deleted = 0`
         )
-        .run(pieceCid, copiesCount, bucket, key)
+        .run(pieceCid, copiesCount, encryptionMeta ?? null, bucket, key)
 
       // Race condition: object was renamed or deleted during upload.
       // Find the new owner by local_path (copyObject transfers local_path to the destination).
@@ -903,10 +917,10 @@ export class MetadataStore {
           )
           this.db
             .prepare(
-              `UPDATE objects SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, updated_at = datetime('now')
+              `UPDATE objects SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = NULL, encryption_meta = COALESCE(?, encryption_meta), updated_at = datetime('now')
                WHERE bucket = ? AND key = ? AND deleted = 0`
             )
-            .run(pieceCid, copiesCount, newOwner.bucket, newOwner.key)
+            .run(pieceCid, copiesCount, encryptionMeta ?? null, newOwner.bucket, newOwner.key)
 
           // Insert copies under the new key
           if (copies && copies.length > 0) {
