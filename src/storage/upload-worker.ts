@@ -1,6 +1,7 @@
 /** Background upload worker — only handles staged object uploads. */
 
 import type { Logger } from 'pino'
+import type { EncryptionService } from './encryption-service.js'
 import type { LocalStore } from './local-store.js'
 import type { MetadataStore } from './metadata-store.js'
 import type { SynapseClient } from './synapse-client.js'
@@ -14,6 +15,8 @@ export interface UploadWorkerOptions {
   intervalMs?: number
   /** Maximum number of concurrent uploads (default: 10) */
   concurrency?: number
+  /** Optional encryption service — when provided, files are encrypted before upload */
+  encryptionService?: EncryptionService | undefined
 }
 
 interface PendingItem {
@@ -32,6 +35,7 @@ export class UploadWorker {
   private readonly logger: Logger
   private readonly intervalMs: number
   private readonly concurrency: number
+  private readonly encryptionService: EncryptionService | undefined
   private timer: ReturnType<typeof setTimeout> | undefined
   private running = false
   private activeCount = 0
@@ -43,6 +47,7 @@ export class UploadWorker {
     this.logger = options.logger.child({ module: 'upload-worker' })
     this.intervalMs = options.intervalMs ?? 5_000
     this.concurrency = options.concurrency ?? 10
+    this.encryptionService = options.encryptionService
   }
 
   /** Start the periodic upload loop */
@@ -148,41 +153,53 @@ export class UploadWorker {
     try {
       this.logger.info({ bucket, key, size: item.size }, 'uploading to FOC')
 
-      // Create a web ReadableStream from the local file
-      // controller.enqueue is wrapped in try/catch to prevent crash if the
-      // consumer (Synapse SDK) closes the stream early (e.g. on size error)
-      const fileStream = this.localStore.createReadStream(localPath)
-      const webStream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          fileStream.on('data', (chunk) => {
-            try {
-              controller.enqueue(new Uint8Array(Buffer.from(chunk)))
-            } catch {
-              // Stream was closed by consumer — stop reading
-              fileStream.destroy()
-            }
-          })
-          fileStream.on('end', () => {
-            try {
-              controller.close()
-            } catch {
-              // Already closed
-            }
-          })
-          fileStream.on('error', (err) => {
-            try {
-              controller.error(err)
-            } catch {
-              // Already closed/errored
-            }
-          })
-        },
-        cancel() {
-          fileStream.destroy()
-        },
-      })
+      let uploadData: Uint8Array | ReadableStream<Uint8Array>
+      let encryptionMeta: string | undefined
 
-      const result = await this.synapseClient.upload(webStream, { copies: desiredCopies })
+      if (this.encryptionService) {
+        // Encrypt the file before upload
+        const fileBuffer = this.localStore.readFile(localPath)
+        const encrypted = await this.encryptionService.encryptBuffer(fileBuffer)
+        const meta = await this.encryptionService.getEncryptionMeta(encrypted)
+        encryptionMeta = JSON.stringify(meta)
+        uploadData = encrypted
+      } else {
+        // Create a web ReadableStream from the local file
+        // controller.enqueue is wrapped in try/catch to prevent crash if the
+        // consumer (Synapse SDK) closes the stream early (e.g. on size error)
+        const fileStream = this.localStore.createReadStream(localPath)
+        uploadData = new ReadableStream<Uint8Array>({
+          start(controller) {
+            fileStream.on('data', (chunk) => {
+              try {
+                controller.enqueue(new Uint8Array(Buffer.from(chunk)))
+              } catch {
+                // Stream was closed by consumer — stop reading
+                fileStream.destroy()
+              }
+            })
+            fileStream.on('end', () => {
+              try {
+                controller.close()
+              } catch {
+                // Already closed
+              }
+            })
+            fileStream.on('error', (err) => {
+              try {
+                controller.error(err)
+              } catch {
+                // Already closed/errored
+              }
+            })
+          },
+          cancel() {
+            fileStream.destroy()
+          },
+        })
+      }
+
+      const result = await this.synapseClient.upload(uploadData, { copies: desiredCopies })
 
       if (result.copies.length < desiredCopies) {
         this.metadataStore.recordPartialUpload(bucket, key, result.pieceCid, result.copies, localPath)
@@ -195,7 +212,7 @@ export class UploadWorker {
       }
 
       // Success: update metadata and remove local file
-      this.metadataStore.completeUpload(bucket, key, result.pieceCid, result.copies, localPath)
+      this.metadataStore.completeUpload(bucket, key, result.pieceCid, result.copies, localPath, encryptionMeta)
       this.localStore.delete(localPath)
 
       this.logger.info(
