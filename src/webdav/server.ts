@@ -11,6 +11,7 @@ import { createAuthHook } from '../auth/index.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
+import type { EncryptionService } from '../storage/encryption-service.js'
 import { registerWebDavRoutes } from './routes.js'
 
 export interface WebDavServerOptions {
@@ -22,6 +23,7 @@ export interface WebDavServerOptions {
   logger: Logger
   accessKey?: string | undefined
   secretKey?: string | undefined
+  encryptionService?: EncryptionService | undefined
 }
 
 export async function createWebDavServer(options: WebDavServerOptions) {
@@ -72,6 +74,7 @@ export async function createWebDavServer(options: WebDavServerOptions) {
     synapseClient: options.synapseClient,
     localStore: options.localStore,
     logger: app.log as Logger,
+    encryptionService: options.encryptionService,
   })
 
   return app
