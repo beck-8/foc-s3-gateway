@@ -1,3 +1,10 @@
+/**
+ * Client-side encryption service.
+ *
+ * Derives an AES-256-GCM content encryption key (CEK) from the S3 Secret Key
+ * via PBKDF2-SHA256 (600K iterations). Files are encrypted before upload to
+ * FOC and decrypted on download, so storage providers never see plaintext.
+ */
 import {
   type BlobFetcher,
   type CEKBytes,
@@ -7,7 +14,7 @@ import {
   deriveKey,
   type EnvelopeMetadata,
   encrypt,
-  parseEnvelope,
+  parseEnvelope as libParseEnvelope,
 } from 'foc-encryption'
 
 /** Threshold in bytes above which chunked (seekable) encryption is used. */
@@ -45,7 +52,8 @@ export class EncryptionService {
   async init(): Promise<void> {
     const result = await deriveKey({ kind: 'password', password: this.secretKey }, this.providedSalt)
     this.cek = result.cek as CEKBytes
-    this.salt = result.salt ?? this.providedSalt
+    if (!result.salt) throw new Error('EncryptionService.init: deriveKey did not return a salt')
+    this.salt = result.salt
   }
 
   /** Returns true once `init()` has completed successfully. */
@@ -98,9 +106,9 @@ export class EncryptionService {
   parseEnvelope(fetcher: BlobFetcher): Promise<EnvelopeMetadata>
   parseEnvelope(blobOrFetcher: Uint8Array | BlobFetcher): EnvelopeMetadata | Promise<EnvelopeMetadata> {
     if (blobOrFetcher instanceof Uint8Array) {
-      return parseEnvelope(blobOrFetcher)
+      return libParseEnvelope(blobOrFetcher)
     }
-    return parseEnvelope(blobOrFetcher)
+    return blobOrFetcher.fetchEnvelope().then(bytes => libParseEnvelope(bytes))
   }
 
   /**
@@ -120,7 +128,7 @@ export class EncryptionService {
    * algorithm, envelope size, optional chunk info, and the total encrypted size.
    */
   async getEncryptionMeta(encryptedBlob: Uint8Array): Promise<EncryptionMeta> {
-    const meta = parseEnvelope(encryptedBlob)
+    const meta = libParseEnvelope(encryptedBlob)
     return {
       algorithm: meta.algorithm,
       envelopeSize: meta.envelopeSize,

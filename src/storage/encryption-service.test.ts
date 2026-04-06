@@ -3,6 +3,7 @@ import { CoseAlgorithm } from 'foc-encryption'
 import { describe, expect, it } from 'vitest'
 import { EncryptionService } from './encryption-service.js'
 
+const secretKey = 'test-secret'
 const SMALL_SIZE = 64 * 1024 // 64 KiB — below 256 KiB threshold
 const LARGE_SIZE = 300 * 1024 // 300 KiB — above 256 KiB threshold
 
@@ -75,10 +76,32 @@ describe('EncryptionService', () => {
       const meta = await svc.getEncryptionMeta(encrypted)
 
       expect(meta.algorithm).toBe(CoseAlgorithm.CHUNKED_AES_256_GCM_STREAM) // -65793
+      // 300 KiB plaintext / 256 KiB default chunk size = 2 chunks
       expect(meta.chunkCount).toBe(2)
 
       const decrypted = await svc.decryptBuffer(encrypted)
       expect(decrypted).toEqual(plaintext)
+    })
+  })
+
+  describe('parseEnvelope with BlobFetcher', () => {
+    it('parseEnvelope works with BlobFetcher (async)', async () => {
+      const service = new EncryptionService({ secretKey })
+      await service.init()
+
+      const plaintext = new Uint8Array(300 * 1024)
+      for (let i = 0; i < plaintext.length; i++) plaintext[i] = i % 256
+      const encrypted = await service.encryptBuffer(plaintext)
+
+      const fetcher = {
+        async fetchEnvelope() { return encrypted.slice(0, 4096) },
+        async fetchRange(offset: number, length: number) { return encrypted.slice(offset, offset + length) },
+      }
+
+      const meta = await service.parseEnvelope(fetcher)
+      expect(meta.algorithm).toBe(-65793)
+      expect(meta.seekable).toBe(true)
+      expect(meta.chunkCount).toBe(2)
     })
   })
 
