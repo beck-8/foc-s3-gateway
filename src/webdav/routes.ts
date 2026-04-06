@@ -182,7 +182,6 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
       const encMetaJson = encryptionService ? metadataStore.getEncryptionMeta(bucket, key) : null
 
       if (encMetaJson && encryptionService) {
-        const { Readable } = await import('node:stream')
         const encMeta: EncryptionMeta = JSON.parse(encMetaJson)
 
         if (range && encMeta.algorithm === CoseAlgorithm.CHUNKED_AES_256_GCM_STREAM) {
@@ -202,7 +201,7 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
             'Content-Length': plainRange.length,
             'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
           })
-          Readable.from(plainRange).pipe(reply.raw)
+          reply.raw.end(Buffer.from(plainRange))
         } else {
           // Full download + decrypt
           const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
@@ -215,15 +214,13 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
               'Content-Length': sliced.length,
               'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
             })
-            const { Readable } = await import('node:stream')
-            Readable.from(sliced).pipe(reply.raw)
+            reply.raw.end(Buffer.from(sliced))
           } else {
             reply.raw.writeHead(200, {
               ...baseHeaders,
               'Content-Length': obj.size,
             })
-            const { Readable } = await import('node:stream')
-            Readable.from(plaintext).pipe(reply.raw)
+            reply.raw.end(Buffer.from(plaintext))
           }
         }
       } else {
