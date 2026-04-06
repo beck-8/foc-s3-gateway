@@ -549,6 +549,19 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           reply.raw.end(Buffer.from(plainRange))
         } else {
           // Full download + decrypt (non-seekable algorithm, or no range request)
+          //
+          // TODO: This buffers the entire file in memory (encrypted + decrypted).
+          // For large files (e.g. 500 MB) this uses ~1 GB RAM.
+          //
+          // Streaming decryption would require foc-encryption to expose chunk-level
+          // primitives (deriveChunkNonce + aesGcmDecrypt) so we can: download the
+          // ciphertext as a single stream → decrypt each 256 KiB chunk on arrival →
+          // write to the response immediately. Using decryptRange() in a loop is NOT
+          // viable because each call makes a separate HTTP Range request to the SP
+          // (2192 requests for a 500 MB file).
+          //
+          // Blocked on: foc-encryption exposing a streaming decrypt API or chunk
+          // decryption primitives. See: github.com/Kubuxu/foc-encryption-demo
           const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
           const plaintext = await encryptionService.decryptBuffer(encryptedBlob)
 

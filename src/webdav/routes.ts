@@ -204,6 +204,10 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
           reply.raw.end(Buffer.from(plainRange))
         } else {
           // Full download + decrypt
+          //
+          // TODO: This buffers the entire file in memory (~2x file size).
+          // Streaming decryption requires foc-encryption to expose chunk-level
+          // decryption primitives. See the same TODO in src/routes/index.ts.
           const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
           const plaintext = await encryptionService.decryptBuffer(encryptedBlob)
 
