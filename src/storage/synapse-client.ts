@@ -301,6 +301,40 @@ export class SynapseClient {
     return { stream: Readable.from(data), contentLength: data.length }
   }
 
+  /**
+   * Download the full piece as a Uint8Array buffer.
+   * Used when decryption is needed (can't decrypt a stream).
+   */
+  async downloadBuffer(
+    pieceCid: string,
+    copies?: CopyInfo[]
+  ): Promise<Uint8Array> {
+    // Sort: primary first, then secondary
+    const sorted = copies
+      ? [...copies].sort((a, b) => (a.role === 'primary' ? -1 : 1) - (b.role === 'primary' ? -1 : 1))
+      : []
+
+    // Try stored retrieval URLs first (fast path)
+    for (const copy of sorted) {
+      try {
+        this.logger.debug({ pieceCid, providerId: copy.providerId, role: copy.role }, 'trying buffer download')
+        const response = await fetch(copy.retrievalUrl)
+        if (response.ok) {
+          const buffer = new Uint8Array(await response.arrayBuffer())
+          this.logger.info({ pieceCid, providerId: copy.providerId, size: buffer.length }, 'buffer download complete')
+          return buffer
+        }
+      } catch (error) {
+        this.logger.warn({ pieceCid, providerId: copy.providerId, error }, 'buffer download error, trying next')
+      }
+    }
+
+    // Fallback: Synapse SDK
+    this.logger.info({ pieceCid }, 'falling back to SDK buffer download')
+    const synapse = this.getSynapse()
+    return synapse.storage.download({ pieceCid })
+  }
+
   // ── Delete ────────────────────────────────────────────────────────
 
   /**

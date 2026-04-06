@@ -26,6 +26,7 @@ import {
   buildListBucketsXml,
   buildListObjectsV2Xml,
 } from '../s3/xml.js'
+import type { EncryptionService } from '../storage/encryption-service.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { ProbeWorker } from '../storage/probe-worker.js'
@@ -40,6 +41,7 @@ export interface RouteContext {
   uploadWorker?: UploadWorker | undefined
   probeWorker?: ProbeWorker | undefined
   repairWorker?: RepairWorker | undefined
+  encryptionService?: EncryptionService | undefined
   logger: Logger
 }
 
@@ -118,7 +120,7 @@ function parseCopySource(copySource: string): { bucket: string; key: string } | 
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
-  const { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, logger } = ctx
+  const { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, encryptionService, logger } = ctx
 
   // ── Upload status: GET /_/status ────────────────────────────────────
   //    Not an S3 API — gateway-specific endpoint for monitoring upload queue.
@@ -489,22 +491,48 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
       // Fall back to FOC download (direct SP URLs → SDK discovery)
       const copies = metadataStore.getObjectCopies(bucket, key)
-      const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
+      const encMetaJson = encryptionService ? metadataStore.getEncryptionMeta(bucket, key) : null
 
-      if (range) {
-        const contentLength = range.end - range.start + 1
-        reply.raw.writeHead(206, {
-          ...baseHeaders,
-          'Content-Length': contentLength,
-          'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
-        })
+      if (encMetaJson && encryptionService) {
+        // Encrypted path: download full blob, decrypt, then serve
+        const { Readable } = await import('node:stream')
+        const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
+        const plaintext = await encryptionService.decryptBuffer(encryptedBlob)
+
+        if (range) {
+          const sliced = plaintext.slice(range.start, range.end + 1)
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': sliced.length,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+          Readable.from(sliced).pipe(reply.raw)
+        } else {
+          reply.raw.writeHead(200, {
+            ...baseHeaders,
+            'Content-Length': obj.size,
+          })
+          Readable.from(plaintext).pipe(reply.raw)
+        }
       } else {
-        reply.raw.writeHead(200, {
-          ...baseHeaders,
-          'Content-Length': obj.size,
-        })
+        // Unencrypted path: stream directly (existing behavior)
+        const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
+
+        if (range) {
+          const contentLength = range.end - range.start + 1
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': contentLength,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+        } else {
+          reply.raw.writeHead(200, {
+            ...baseHeaders,
+            'Content-Length': obj.size,
+          })
+        }
+        stream.pipe(reply.raw)
       }
-      stream.pipe(reply.raw)
     } catch (error) {
       logger.error({ error, bucket, key, pieceCid: obj.pieceCid }, 'download failed')
       sendInternalError(reply, 'Failed to download object from FOC storage')
