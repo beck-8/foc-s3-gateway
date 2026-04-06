@@ -34,6 +34,7 @@
     "better-sqlite3": "^11.8.1",
     "commander": "^14.0.3",
     "fastify": "^5.7.4",
+    "foc-encryption": "file:../foc-encryption-demo/packages/foc-encryption",
     "pino": "^10.3.1",
     "pino-pretty": "^13.0.0",
     "viem": "^2.46.3"
