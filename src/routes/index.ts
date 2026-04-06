@@ -27,6 +27,7 @@ import {
   buildListObjectsV2Xml,
 } from '../s3/xml.js'
 import type { BlobFetcher } from 'foc-encryption'
+import { CoseAlgorithm } from 'foc-encryption'
 import type { EncryptionMeta, EncryptionService } from '../storage/encryption-service.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
@@ -482,6 +483,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       // Local-first: try local disk before going to FOC
       const localPath = metadataStore.getLocalPath(bucket, key)
       if (localPath && localStore.exists(localPath)) {
+        // Local staged files are always plaintext — encryption is applied only at upload time
+        // by the upload-worker. No decryption needed when serving from local disk.
         logger.debug({ bucket, key, localPath, range }, 'serving from local disk')
 
         if (range) {
@@ -525,7 +528,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         const { Readable } = await import('node:stream')
         const encMeta: EncryptionMeta = JSON.parse(encMetaJson)
 
-        if (range && encMeta.algorithm === -65793) {
+        if (range && encMeta.algorithm === CoseAlgorithm.CHUNKED_AES_256_GCM_STREAM) {
           // Seekable encrypted file with range request: use efficient range decryption
           const primaryCopy = copies.find(c => c.role === 'primary') ?? copies[0]
           if (!primaryCopy) {

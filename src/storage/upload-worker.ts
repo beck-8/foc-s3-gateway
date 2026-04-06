@@ -202,7 +202,7 @@ export class UploadWorker {
       const result = await this.synapseClient.upload(uploadData, { copies: desiredCopies })
 
       if (result.copies.length < desiredCopies) {
-        this.metadataStore.recordPartialUpload(bucket, key, result.pieceCid, result.copies, localPath)
+        this.metadataStore.recordPartialUpload(bucket, key, result.pieceCid, result.copies, localPath, encryptionMeta)
         this.localStore.delete(localPath)
         this.logger.warn(
           { bucket, key, pieceCid: result.pieceCid, desiredCopies, actualCopies: result.copies.length },

@@ -679,6 +679,24 @@ describe('MetadataStore', () => {
       expect(parsed.encryptedSize).toBe(1048640)
     })
 
+    it('copyObject preserves encryption_meta in destination', () => {
+      store.createBucket('enc-copy-src')
+      store.createBucket('enc-copy-dst')
+
+      const encMeta = JSON.stringify({ algorithm: -65793, envelopeSize: 247, chunkSize: 262144, chunkCount: 2, encryptedSize: 524400 })
+      store.stageObject('enc-copy-src', 'file.bin', 524288, 'application/octet-stream', 'abc', '/tmp/f', undefined, encMeta)
+      store.completeUpload('enc-copy-src', 'file.bin', 'baga6ea4seaq456', [], '/tmp/f')
+
+      const copied = store.copyObject('enc-copy-src', 'file.bin', 'enc-copy-dst', 'copied.bin')
+      expect(copied).toBeDefined()
+
+      const dstMeta = store.getEncryptionMeta('enc-copy-dst', 'copied.bin')
+      expect(dstMeta).not.toBeNull()
+      const parsed = JSON.parse(dstMeta!)
+      expect(parsed.algorithm).toBe(-65793)
+      expect(parsed.chunkCount).toBe(2)
+    })
+
     it('stageObject without encryption_meta stores null', () => {
       store.createBucket('enc-test2')
       store.stageObject('enc-test2', 'plain.txt', 500, 'text/plain', 'def456', '/tmp/plain')

@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { BlobFetcher } from 'foc-encryption'
+import { CoseAlgorithm } from 'foc-encryption'
 import type { Logger } from 'pino'
 import { parseRangeHeader } from '../s3/range.js'
 import type { LocalStore } from '../storage/local-store.js'
@@ -142,6 +143,8 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
       // Local-first: try local disk before going to FOC
       const localPath = metadataStore.getLocalPath(bucket, key)
       if (localPath && localStore.exists(localPath)) {
+        // Local staged files are always plaintext — encryption is applied only at upload time
+        // by the upload-worker. No decryption needed when serving from local disk.
         logger.debug({ bucket, key, localPath, range }, 'WebDAV serving from local disk')
 
         if (range) {
@@ -182,7 +185,7 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
         const { Readable } = await import('node:stream')
         const encMeta: EncryptionMeta = JSON.parse(encMetaJson)
 
-        if (range && encMeta.algorithm === -65793) {
+        if (range && encMeta.algorithm === CoseAlgorithm.CHUNKED_AES_256_GCM_STREAM) {
           // Seekable range decryption
           const primaryCopy = copies.find(c => c.role === 'primary') ?? copies[0]
           if (!primaryCopy) throw new Error('No copies available for range decryption')

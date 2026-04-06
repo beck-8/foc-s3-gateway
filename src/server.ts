@@ -103,6 +103,9 @@ export async function createServer(options: ServerOptions) {
     // Persist salt on first run so the same CEK is derived on restart
     if (!existingSaltHex) {
       const salt = encryptionService.getSalt()
+      // The PBKDF2 salt is not secret — its purpose is uniqueness (preventing
+      // pre-computation attacks), not secrecy. Protection comes from the 600K
+      // iteration count and the user's secret key.
       metadataStore.setConfig('encryption_salt', Buffer.from(salt).toString('hex'))
       logger.info('encryption salt generated and stored')
     }

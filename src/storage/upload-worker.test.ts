@@ -62,7 +62,8 @@ describe('UploadWorker desired copies handling', () => {
       'a.bin',
       'cid-1',
       expect.any(Array),
-      '/tmp/a'
+      '/tmp/a',
+      undefined
     )
     expect(metadataStore.markUploadFailed).not.toHaveBeenCalled()
     expect(metadataStore.completeUpload).not.toHaveBeenCalled()

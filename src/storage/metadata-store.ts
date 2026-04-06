@@ -659,15 +659,16 @@ export class MetadataStore {
     // Fetch full source row including upload state fields (status, local_path, upload_attempts)
     const srcFull = this.db
       .prepare(
-        'SELECT desired_copies, status, local_path, upload_attempts FROM objects WHERE bucket = ? AND key = ? AND deleted = 0'
+        'SELECT desired_copies, status, local_path, upload_attempts, encryption_meta FROM objects WHERE bucket = ? AND key = ? AND deleted = 0'
       )
       .get(srcBucket, srcKey) as
-      | { desired_copies: number; status: string | null; local_path: string | null; upload_attempts: number }
+      | { desired_copies: number; status: string | null; local_path: string | null; upload_attempts: number; encryption_meta: string | null }
       | undefined
     const srcDesiredCopies = srcFull?.desired_copies ?? 2
     const srcStatus = srcFull?.status ?? 'uploaded'
     const srcLocalPath = srcFull?.local_path ?? null
     const srcUploadAttempts = srcFull?.upload_attempts ?? 0
+    const srcEncryptionMeta = srcFull?.encryption_meta ?? null
 
     const srcCopies = this.getObjectCopies(srcBucket, srcKey)
 
@@ -711,8 +712,8 @@ export class MetadataStore {
       // Insert/replace destination object — preserve upload state (status, local_path, upload_attempts)
       this.db
         .prepare(`
-        INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, status, local_path, upload_attempts, updated_at, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
+        INSERT INTO objects (bucket, key, piece_cid, size, content_type, etag, copies_count, desired_copies, status, local_path, upload_attempts, encryption_meta, updated_at, deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 0)
         ON CONFLICT (bucket, key) DO UPDATE SET
           piece_cid = excluded.piece_cid,
           size = excluded.size,
@@ -723,6 +724,7 @@ export class MetadataStore {
           status = excluded.status,
           local_path = excluded.local_path,
           upload_attempts = excluded.upload_attempts,
+          encryption_meta = excluded.encryption_meta,
           updated_at = datetime('now'),
           deleted = 0
       `)
@@ -737,7 +739,8 @@ export class MetadataStore {
           srcDesiredCopies,
           srcStatus,
           srcLocalPath,
-          srcUploadAttempts
+          srcUploadAttempts,
+          srcEncryptionMeta
         )
 
       // Transfer local file ownership: clear source local_path so only destination owns the file
@@ -972,17 +975,17 @@ export class MetadataStore {
   }
 
   /** Record copies from a partial upload and keep object readable while awaiting repair */
-  recordPartialUpload(bucket: string, key: string, pieceCid: string, copies: CopyInfo[], localPath?: string): void {
+  recordPartialUpload(bucket: string, key: string, pieceCid: string, copies: CopyInfo[], localPath?: string, encryptionMeta?: string): void {
     const copiesCount = copies.length
 
     const transaction = this.db.transaction(() => {
       const result = this.db
         .prepare(
           `UPDATE objects
-           SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = ?, updated_at = datetime('now')
+           SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = ?, encryption_meta = COALESCE(?, encryption_meta), updated_at = datetime('now')
            WHERE bucket = ? AND key = ? AND deleted = 0`
         )
-        .run(pieceCid, copiesCount, localPath ?? null, bucket, key)
+        .run(pieceCid, copiesCount, localPath ?? null, encryptionMeta ?? null, bucket, key)
 
       // Race condition: object was renamed or deleted during upload (same as completeUpload)
       if (result.changes === 0 && localPath) {
@@ -998,10 +1001,10 @@ export class MetadataStore {
           this.db
             .prepare(
               `UPDATE objects
-               SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = ?, updated_at = datetime('now')
+               SET piece_cid = ?, copies_count = ?, status = 'uploaded', local_path = ?, encryption_meta = COALESCE(?, encryption_meta), updated_at = datetime('now')
                WHERE bucket = ? AND key = ? AND deleted = 0`
             )
-            .run(pieceCid, copiesCount, localPath ?? null, newOwner.bucket, newOwner.key)
+            .run(pieceCid, copiesCount, localPath ?? null, encryptionMeta ?? null, newOwner.bucket, newOwner.key)
 
           this.db.prepare('DELETE FROM object_copies WHERE bucket = ? AND key = ?').run(newOwner.bucket, newOwner.key)
           const insertCopy = this.db.prepare(
