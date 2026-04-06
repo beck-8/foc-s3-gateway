@@ -9,6 +9,7 @@ import Fastify from 'fastify'
 import type { Logger } from 'pino'
 import { createAuthHook } from './auth/index.js'
 import { registerRoutes } from './routes/index.js'
+import { EncryptionService } from './storage/encryption-service.js'
 import { CleanupWorker } from './storage/cleanup-worker.js'
 import { LocalStore } from './storage/local-store.js'
 import { MetadataStore } from './storage/metadata-store.js'
@@ -39,6 +40,8 @@ export interface ServerOptions {
   repairScanIntervalMs?: number | undefined
   repairConcurrency?: number | undefined
   repairCooldownMs?: number | undefined
+  /** Enable client-side encryption. Requires secretKey to be set. */
+  encryption?: boolean | undefined
 }
 
 export async function createServer(options: ServerOptions) {
@@ -85,6 +88,30 @@ export async function createServer(options: ServerOptions) {
   const walletAddress = synapseClient.getAddress()
   metadataStore.validateWalletAddress(walletAddress)
 
+  // Initialize encryption if enabled and secret key is available
+  let encryptionService: EncryptionService | undefined
+  if (options.encryption && options.secretKey) {
+    const existingSaltHex = metadataStore.getConfig('encryption_salt')
+    const existingSalt = existingSaltHex ? new Uint8Array(Buffer.from(existingSaltHex, 'hex')) : undefined
+
+    encryptionService = new EncryptionService({
+      secretKey: options.secretKey,
+      ...(existingSalt !== undefined ? { salt: existingSalt } : {}),
+    })
+    await encryptionService.init()
+
+    // Persist salt on first run so the same CEK is derived on restart
+    if (!existingSaltHex) {
+      const salt = encryptionService.getSalt()
+      metadataStore.setConfig('encryption_salt', Buffer.from(salt).toString('hex'))
+      logger.info('encryption salt generated and stored')
+    }
+
+    logger.info('client-side encryption enabled (AES-256-GCM, key derived from Secret Key)')
+  } else if (options.encryption && !options.secretKey) {
+    throw new Error('Encryption requires --secret-key (or SECRET_KEY env) to derive the encryption key')
+  }
+
   // Parse XML bodies as strings (needed for DeleteObjects, etc.)
   // All other content types pass through as raw streams (for PutObject uploads)
   app.removeAllContentTypeParsers()
@@ -117,6 +144,7 @@ export async function createServer(options: ServerOptions) {
     synapseClient,
     localStore,
     logger,
+    encryptionService,
   }
   const scanIntervalMs = options.scanIntervalMs ?? readPositiveIntEnv('UPLOAD_SCAN_INTERVAL_MS')
   const uploadConcurrency = options.uploadConcurrency ?? readPositiveIntEnv('UPLOAD_CONCURRENCY')
@@ -159,7 +187,7 @@ export async function createServer(options: ServerOptions) {
   const repairWorker = new RepairWorker(repairWorkerOptions)
 
   // Register S3 routes
-  registerRoutes(app, { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, logger })
+  registerRoutes(app, { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, encryptionService, logger })
 
   // Reset objects stuck in 'uploading' state from a previous server run
   metadataStore.resetStuckUploads()
@@ -177,11 +205,11 @@ export async function createServer(options: ServerOptions) {
     metadataStore.close()
   })
 
-  return { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker, probeWorker, repairWorker }
+  return { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker, probeWorker, repairWorker, encryptionService }
 }
 
 export async function startServer(options: ServerOptions): Promise<void> {
-  const { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker, probeWorker, repairWorker } =
+  const { app, metadataStore, synapseClient, localStore, cleanupWorker, uploadWorker, probeWorker, repairWorker, encryptionService } =
     await createServer(options)
 
   try {
@@ -205,17 +233,20 @@ export async function startServer(options: ServerOptions): Promise<void> {
       logger: app.log as Logger,
       accessKey: options.accessKey,
       secretKey: options.secretKey,
+      encryptionService,
     })
 
     const webdavAddr = `${options.host}:${webdavPort}`
 
     const authStatus = options.accessKey ? 'enabled' : 'disabled'
+    const encStatus = encryptionService ? 'enabled (AES-256-GCM)' : 'disabled'
     app.log.info(`
   FOC S3 Gateway
   ----------------------------------
-  S3:     http://${addressStr}
-  WebDAV: http://${webdavAddr}
-  Auth:   ${authStatus}
+  S3:         http://${addressStr}
+  WebDAV:     http://${webdavAddr}
+  Auth:       ${authStatus}
+  Encryption: ${encStatus}
   ----------------------------------
 `)
   } catch (error) {

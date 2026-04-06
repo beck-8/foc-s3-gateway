@@ -24,6 +24,7 @@ program
   .option('-s, --secret-key <key>', 'Secret key for authentication (or set SECRET_KEY env)')
   .option('-w, --webdav-port <port>', 'WebDAV server port (default: S3 port + 1)')
   .option('-c, --copies <count>', 'Default desired copies for new uploads (or set COPIES env)', '2')
+  .option('-e, --encryption', 'Enable client-side encryption (requires --secret-key)')
   .action(async (options) => {
     const privateKey = options.privateKey ?? process.env.PRIVATE_KEY
     if (!privateKey) {
@@ -50,6 +51,7 @@ program
       secretKey: options.secretKey ?? process.env.SECRET_KEY,
       webdavPort: options.webdavPort ? Number.parseInt(options.webdavPort, 10) : undefined,
       copies,
+      encryption: options.encryption,
     })
   })
 
