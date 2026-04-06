@@ -26,6 +26,9 @@ import {
   buildListBucketsXml,
   buildListObjectsV2Xml,
 } from '../s3/xml.js'
+import type { BlobFetcher } from 'foc-encryption'
+import { CoseAlgorithm } from 'foc-encryption'
+import type { EncryptionMeta, EncryptionService } from '../storage/encryption-service.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
 import type { ProbeWorker } from '../storage/probe-worker.js'
@@ -40,12 +43,16 @@ export interface RouteContext {
   uploadWorker?: UploadWorker | undefined
   probeWorker?: ProbeWorker | undefined
   repairWorker?: RepairWorker | undefined
+  encryptionService?: EncryptionService | undefined
   logger: Logger
 }
 
 /** Minimum file size for FOC storage providers */
 const MIN_UPLOAD_SIZE = 127
-/** Maximum upload size (~1 GiB) */
+/** Maximum upload size (~1 GiB).
+ * When encryption is enabled, the encrypted blob is slightly larger (envelope ~250B +
+ * 16B auth tag per 256 KiB chunk ≈ 0.006% overhead). This does not materially affect
+ * the FOC piece size limit, so we validate against plaintext size only. */
 const MAX_UPLOAD_SIZE = 1_065_353_216
 
 /** Read XML body from request — handles cases where Content-Type isn't application/xml */
@@ -117,8 +124,32 @@ function parseCopySource(copySource: string): { bucket: string; key: string } | 
   }
 }
 
+/** Create a BlobFetcher that reads from a storage provider retrieval URL via HTTP Range */
+function createSpBlobFetcher(retrievalUrl: string): BlobFetcher {
+  return {
+    async fetchEnvelope(): Promise<Uint8Array> {
+      const resp = await fetch(retrievalUrl, {
+        headers: { Range: 'bytes=0-4095' },
+      })
+      if (!resp.ok && resp.status !== 206) {
+        throw new Error(`Failed to fetch envelope: HTTP ${resp.status}`)
+      }
+      return new Uint8Array(await resp.arrayBuffer())
+    },
+    async fetchRange(offset: number, length: number): Promise<Uint8Array> {
+      const resp = await fetch(retrievalUrl, {
+        headers: { Range: `bytes=${offset}-${offset + length - 1}` },
+      })
+      if (!resp.ok && resp.status !== 206) {
+        throw new Error(`Failed to fetch range: HTTP ${resp.status}`)
+      }
+      return new Uint8Array(await resp.arrayBuffer())
+    },
+  }
+}
+
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
-  const { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, logger } = ctx
+  const { metadataStore, synapseClient, localStore, uploadWorker, probeWorker, repairWorker, encryptionService, logger } = ctx
 
   // ── Upload status: GET /_/status ────────────────────────────────────
   //    Not an S3 API — gateway-specific endpoint for monitoring upload queue.
@@ -452,6 +483,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       // Local-first: try local disk before going to FOC
       const localPath = metadataStore.getLocalPath(bucket, key)
       if (localPath && localStore.exists(localPath)) {
+        // Local staged files are always plaintext — encryption is applied only at upload time
+        // by the upload-worker. No decryption needed when serving from local disk.
         logger.debug({ bucket, key, localPath, range }, 'serving from local disk')
 
         if (range) {
@@ -489,22 +522,84 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
       // Fall back to FOC download (direct SP URLs → SDK discovery)
       const copies = metadataStore.getObjectCopies(bucket, key)
-      const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
+      const encMetaJson = encryptionService ? metadataStore.getEncryptionMeta(bucket, key) : null
 
-      if (range) {
-        const contentLength = range.end - range.start + 1
-        reply.raw.writeHead(206, {
-          ...baseHeaders,
-          'Content-Length': contentLength,
-          'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
-        })
+      if (encMetaJson && encryptionService) {
+        const encMeta: EncryptionMeta = JSON.parse(encMetaJson)
+
+        if (range && encMeta.algorithm === CoseAlgorithm.CHUNKED_AES_256_GCM_STREAM) {
+          // Seekable encrypted file with range request: use efficient range decryption
+          const primaryCopy = copies.find(c => c.role === 'primary') ?? copies[0]
+          if (!primaryCopy) {
+            throw new Error('No copies available for range decryption')
+          }
+
+          const fetcher = createSpBlobFetcher(primaryCopy.retrievalUrl)
+          const metadata = await encryptionService.parseEnvelope(fetcher)
+          const plainRange = await encryptionService.decryptRange(fetcher, metadata, {
+            offset: range.start,
+            length: range.end - range.start + 1,
+          })
+
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': plainRange.length,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+          reply.raw.end(Buffer.from(plainRange))
+        } else {
+          // Full download + decrypt (non-seekable algorithm, or no range request)
+          //
+          // TODO: This buffers the entire file in memory (encrypted + decrypted).
+          // For large files (e.g. 500 MB) this uses ~1 GB RAM.
+          //
+          // Streaming decryption would require foc-encryption to expose chunk-level
+          // primitives (deriveChunkNonce + aesGcmDecrypt) so we can: download the
+          // ciphertext as a single stream → decrypt each 256 KiB chunk on arrival →
+          // write to the response immediately. Using decryptRange() in a loop is NOT
+          // viable because each call makes a separate HTTP Range request to the SP
+          // (2192 requests for a 500 MB file).
+          //
+          // Blocked on: foc-encryption exposing a streaming decrypt API or chunk
+          // decryption primitives. See: github.com/Kubuxu/foc-encryption-demo
+          const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
+          const plaintext = await encryptionService.decryptBuffer(encryptedBlob)
+
+          if (range) {
+            const sliced = plaintext.slice(range.start, range.end + 1)
+            reply.raw.writeHead(206, {
+              ...baseHeaders,
+              'Content-Length': sliced.length,
+              'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+            })
+            reply.raw.end(Buffer.from(sliced))
+          } else {
+            reply.raw.writeHead(200, {
+              ...baseHeaders,
+              'Content-Length': obj.size,
+            })
+            reply.raw.end(Buffer.from(plaintext))
+          }
+        }
       } else {
-        reply.raw.writeHead(200, {
-          ...baseHeaders,
-          'Content-Length': obj.size,
-        })
+        // Unencrypted path (keep existing code unchanged)
+        const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
+
+        if (range) {
+          const contentLength = range.end - range.start + 1
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': contentLength,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+        } else {
+          reply.raw.writeHead(200, {
+            ...baseHeaders,
+            'Content-Length': obj.size,
+          })
+        }
+        stream.pipe(reply.raw)
       }
-      stream.pipe(reply.raw)
     } catch (error) {
       logger.error({ error, bucket, key, pieceCid: obj.pieceCid }, 'download failed')
       sendInternalError(reply, 'Failed to download object from FOC storage')

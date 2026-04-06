@@ -17,6 +17,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -104,6 +105,11 @@ export class LocalStore {
     this.cleanupMultipartDir(uploadId)
 
     return { localPath: stagedPath, size: totalSize, etag: md5.digest('hex') }
+  }
+
+  /** Read entire file into a Uint8Array (for encryption before upload). */
+  readFile(localPath: string): Uint8Array {
+    return new Uint8Array(readFileSync(localPath))
   }
 
   /** Create a file read stream for a staged file, optionally with byte range */

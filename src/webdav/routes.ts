@@ -7,10 +7,13 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import type { BlobFetcher } from 'foc-encryption'
+import { CoseAlgorithm } from 'foc-encryption'
 import type { Logger } from 'pino'
 import { parseRangeHeader } from '../s3/range.js'
 import type { LocalStore } from '../storage/local-store.js'
 import type { MetadataStore } from '../storage/metadata-store.js'
+import type { EncryptionMeta, EncryptionService } from '../storage/encryption-service.js'
 import type { SynapseClient } from '../storage/synapse-client.js'
 import type { DavResource } from './xml.js'
 import { buildMultistatusXml } from './xml.js'
@@ -20,6 +23,7 @@ export interface WebDavRouteOptions {
   synapseClient: SynapseClient
   localStore: LocalStore
   logger: Logger
+  encryptionService?: EncryptionService | undefined
 }
 
 /** Parse a path into bucket and key components */
@@ -46,8 +50,23 @@ function getDepth(request: FastifyRequest): number {
   return 1 // default for '1', undefined, or any invalid value
 }
 
+function createSpBlobFetcher(retrievalUrl: string): BlobFetcher {
+  return {
+    async fetchEnvelope(): Promise<Uint8Array> {
+      const resp = await fetch(retrievalUrl, { headers: { Range: 'bytes=0-4095' } })
+      if (!resp.ok && resp.status !== 206) throw new Error(`Failed to fetch envelope: HTTP ${resp.status}`)
+      return new Uint8Array(await resp.arrayBuffer())
+    },
+    async fetchRange(offset: number, length: number): Promise<Uint8Array> {
+      const resp = await fetch(retrievalUrl, { headers: { Range: `bytes=${offset}-${offset + length - 1}` } })
+      if (!resp.ok && resp.status !== 206) throw new Error(`Failed to fetch range: HTTP ${resp.status}`)
+      return new Uint8Array(await resp.arrayBuffer())
+    },
+  }
+}
+
 export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteOptions): void {
-  const { metadataStore, synapseClient, localStore, logger } = options
+  const { metadataStore, synapseClient, localStore, logger, encryptionService } = options
 
   // ── OPTIONS ──────────────────────────────────────────────────────────
   app.options('/*', async (_request, reply) => {
@@ -124,6 +143,8 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
       // Local-first: try local disk before going to FOC
       const localPath = metadataStore.getLocalPath(bucket, key)
       if (localPath && localStore.exists(localPath)) {
+        // Local staged files are always plaintext — encryption is applied only at upload time
+        // by the upload-worker. No decryption needed when serving from local disk.
         logger.debug({ bucket, key, localPath, range }, 'WebDAV serving from local disk')
 
         if (range) {
@@ -158,22 +179,73 @@ export function registerWebDavRoutes(app: FastifyInstance, options: WebDavRouteO
 
       // Fall back to FOC download
       const copies = metadataStore.getObjectCopies(bucket, key)
-      const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
+      const encMetaJson = encryptionService ? metadataStore.getEncryptionMeta(bucket, key) : null
 
-      if (range) {
-        const contentLength = range.end - range.start + 1
-        reply.raw.writeHead(206, {
-          ...baseHeaders,
-          'Content-Length': contentLength,
-          'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
-        })
+      if (encMetaJson && encryptionService) {
+        const encMeta: EncryptionMeta = JSON.parse(encMetaJson)
+
+        if (range && encMeta.algorithm === CoseAlgorithm.CHUNKED_AES_256_GCM_STREAM) {
+          // Seekable range decryption
+          const primaryCopy = copies.find(c => c.role === 'primary') ?? copies[0]
+          if (!primaryCopy) throw new Error('No copies available for range decryption')
+
+          const fetcher = createSpBlobFetcher(primaryCopy.retrievalUrl)
+          const metadata = await encryptionService.parseEnvelope(fetcher)
+          const plainRange = await encryptionService.decryptRange(fetcher, metadata, {
+            offset: range.start,
+            length: range.end - range.start + 1,
+          })
+
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': plainRange.length,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+          reply.raw.end(Buffer.from(plainRange))
+        } else {
+          // Full download + decrypt
+          //
+          // TODO: This buffers the entire file in memory (~2x file size).
+          // Streaming decryption requires foc-encryption to expose chunk-level
+          // decryption primitives. See the same TODO in src/routes/index.ts.
+          const encryptedBlob = await synapseClient.downloadBuffer(obj.pieceCid, copies)
+          const plaintext = await encryptionService.decryptBuffer(encryptedBlob)
+
+          if (range) {
+            const sliced = plaintext.slice(range.start, range.end + 1)
+            reply.raw.writeHead(206, {
+              ...baseHeaders,
+              'Content-Length': sliced.length,
+              'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+            })
+            reply.raw.end(Buffer.from(sliced))
+          } else {
+            reply.raw.writeHead(200, {
+              ...baseHeaders,
+              'Content-Length': obj.size,
+            })
+            reply.raw.end(Buffer.from(plaintext))
+          }
+        }
       } else {
-        reply.raw.writeHead(200, {
-          ...baseHeaders,
-          'Content-Length': obj.size,
-        })
+        // Unencrypted path (existing behavior)
+        const { stream } = await synapseClient.download(obj.pieceCid, copies, range)
+
+        if (range) {
+          const contentLength = range.end - range.start + 1
+          reply.raw.writeHead(206, {
+            ...baseHeaders,
+            'Content-Length': contentLength,
+            'Content-Range': `bytes ${range.start}-${range.end}/${obj.size}`,
+          })
+        } else {
+          reply.raw.writeHead(200, {
+            ...baseHeaders,
+            'Content-Length': obj.size,
+          })
+        }
+        stream.pipe(reply.raw)
       }
-      stream.pipe(reply.raw)
     } catch (error) {
       logger.error({ error, bucket, key }, 'WebDAV download failed')
       reply.status(500).send('Internal Server Error')
